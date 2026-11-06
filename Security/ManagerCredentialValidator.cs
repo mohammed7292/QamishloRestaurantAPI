@@ -16,7 +16,15 @@ public static class ManagerCredentialValidator
 
         await using var connection = DatabaseManager.GetConnection();
         await connection.OpenAsync();
-        const string sql = "SELECT UserID FROM Users WHERE Username=@username AND Password=@password AND IsActive=1 AND Role IN ('Admin','Manager') LIMIT 1";
+        const string sql = """
+    SELECT UserID
+    FROM users
+    WHERE Username = @username
+      AND Password = @password
+      AND IsActive = 1
+      AND Role IN ('Admin', 'Manager')
+    LIMIT 1;
+    """;
         await using var cmd = new MySqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@username", username.Trim());
         cmd.Parameters.AddWithValue("@password", password);
