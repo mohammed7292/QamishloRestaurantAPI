@@ -3,6 +3,7 @@ using MySqlConnector;
 using QamishloRestaurantAPI.Database;
 using System;
 using System.Collections.Generic;
+using System.Text.Json;
 using System.Threading.Tasks;
 
 namespace QamishloRestaurantAPI.Controllers
@@ -355,19 +356,96 @@ namespace QamishloRestaurantAPI.Controllers
                     }
 
                     // =================================================
-                    // 3. DELIVERY FEE
+                    // 3. VALIDATE DELIVERY ZONE + MINIMUM ORDER
+                    // Server values are authoritative; never trust the fee sent by the app.
                     // =================================================
 
                     decimal deliveryFee = 0m;
+                    int? deliveryZoneId = null;
 
                     if (orderType == "Delivery")
                     {
-                        deliveryFee =
-                            request.DeliveryFee;
-
-                        if (deliveryFee < 0)
+                        if (!request.Latitude.HasValue || !request.Longitude.HasValue)
                         {
-                            deliveryFee = 0;
+                            await transaction.RollbackAsync();
+                            return BadRequest(new
+                            {
+                                success = false,
+                                message = "Delivery location is required."
+                            });
+                        }
+
+                        decimal minimumOrderAmount = 3500m;
+                        const string minimumQuery = @"
+                            SELECT MinimumOrderAmount
+                            FROM restaurantsettings
+                            ORDER BY SettingID
+                            LIMIT 1;";
+
+                        using (MySqlCommand minimumCommand =
+                            new MySqlCommand(minimumQuery, connection, transaction))
+                        {
+                            object? minimumResult = await minimumCommand.ExecuteScalarAsync();
+                            if (minimumResult != null && minimumResult != DBNull.Value)
+                                minimumOrderAmount = Convert.ToDecimal(minimumResult);
+                        }
+
+                        if (subtotal < minimumOrderAmount)
+                        {
+                            await transaction.RollbackAsync();
+                            return BadRequest(new
+                            {
+                                success = false,
+                                code = "MINIMUM_ORDER_NOT_MET",
+                                message = $"Your food subtotal is below the minimum order of {minimumOrderAmount:0.##} IQD.",
+                                minimumOrderAmount,
+                                subtotal
+                            });
+                        }
+
+                        const string zonesQuery = @"
+                            SELECT DeliveryZoneID, DeliveryFee, ZoneCoordinates
+                            FROM deliveryzones
+                            WHERE IsActive = 1
+                              AND ZoneCoordinates IS NOT NULL
+                              AND ZoneCoordinates <> ''
+                            ORDER BY DeliveryZoneID;";
+
+                        using (MySqlCommand zonesCommand =
+                            new MySqlCommand(zonesQuery, connection, transaction))
+                        using (MySqlDataReader zonesReader =
+                            await zonesCommand.ExecuteReaderAsync())
+                        {
+                            while (await zonesReader.ReadAsync())
+                            {
+                                int candidateZoneId = zonesReader.GetInt32(
+                                    zonesReader.GetOrdinal("DeliveryZoneID"));
+                                decimal candidateFee = zonesReader.GetDecimal(
+                                    zonesReader.GetOrdinal("DeliveryFee"));
+                                string coordinatesJson = zonesReader.GetString(
+                                    zonesReader.GetOrdinal("ZoneCoordinates"));
+
+                                if (IsPointInsideDeliveryPolygon(
+                                    request.Latitude.Value,
+                                    request.Longitude.Value,
+                                    coordinatesJson))
+                                {
+                                    deliveryZoneId = candidateZoneId;
+                                    deliveryFee = candidateFee;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (!deliveryZoneId.HasValue)
+                        {
+                            await transaction.RollbackAsync();
+                            return BadRequest(new
+                            {
+                                success = false,
+                                code = "OUTSIDE_DELIVERY_ZONES",
+                                message = "Sorry, this location is outside our active delivery areas."
+                            });
                         }
                     }
 
@@ -468,11 +546,9 @@ namespace QamishloRestaurantAPI.Controllers
                             "@UserID",
                             1);
 
-                        // Customer app currently does not send
-                        // DeliveryZoneID.
                         command.Parameters.AddWithValue(
                             "@DeliveryZoneID",
-                            DBNull.Value);
+                            (object?)deliveryZoneId ?? DBNull.Value);
 
                         command.Parameters.AddWithValue(
                             "@OrderType",
@@ -613,6 +689,8 @@ namespace QamishloRestaurantAPI.Controllers
                         subtotal = subtotal,
 
                         deliveryFee = deliveryFee,
+
+                        deliveryZoneId = deliveryZoneId,
 
                         discountAmount = discount,
 
@@ -845,6 +923,107 @@ namespace QamishloRestaurantAPI.Controllers
                     {
                         success = false,
                         message = "Failed to load orders.",
+                        error = ex.Message
+                    });
+            }
+        }
+
+        // =========================================================
+        // GET CUSTOMER ORDER HISTORY
+        // GET: /api/orders/customer/5
+        // =========================================================
+
+        [HttpGet("customer/{customerId:int}")]
+        public async Task<IActionResult> GetCustomerOrderHistory(
+            int customerId)
+        {
+            if (customerId <= 0)
+            {
+                return BadRequest(new
+                {
+                    success = false,
+                    message = "Invalid customer ID."
+                });
+            }
+
+            try
+            {
+                using MySqlConnection connection =
+                    DatabaseManager.GetConnection();
+
+                await connection.OpenAsync();
+
+                string query = @"
+                    SELECT
+                        o.OrderID,
+                        o.CustomerID,
+                        o.UserID,
+                        o.DeliveryZoneID,
+                        o.OrderDate,
+                        o.OrderType,
+                        o.Status,
+                        o.Subtotal,
+                        o.DeliveryFee,
+                        o.DiscountAmount,
+                        o.TotalAmount,
+                        o.DeliveryAddress,
+                        o.Notes,
+                        o.CreatedAt,
+                        o.UpdatedAt,
+                        o.DeliveryWorkerID,
+
+                        COALESCE(c.FullName, 'Walk-in Customer') AS CustomerName,
+                        COALESCE(c.Phone, '') AS CustomerPhone,
+                        COALESCE(u.FullName, 'Unknown') AS UserName,
+                        COALESCE(dz.ZoneName, '') AS DeliveryZoneName,
+                        COALESCE(dw.FullName, '') AS DeliveryWorkerName,
+                        COALESCE(dw.Phone, '') AS DeliveryWorkerPhone
+
+                    FROM orders o
+                    LEFT JOIN customers c
+                        ON o.CustomerID = c.CustomerID
+                    LEFT JOIN users u
+                        ON o.UserID = u.UserID
+                    LEFT JOIN deliveryzones dz
+                        ON o.DeliveryZoneID = dz.DeliveryZoneID
+                    LEFT JOIN deliveryworkers dw
+                        ON o.DeliveryWorkerID = dw.DeliveryWorkerID
+                    WHERE o.CustomerID = @CustomerID
+                    ORDER BY o.OrderDate DESC, o.OrderID DESC;";
+
+                using MySqlCommand command =
+                    new MySqlCommand(query, connection);
+
+                command.Parameters.AddWithValue(
+                    "@CustomerID",
+                    customerId);
+
+                using MySqlDataReader reader =
+                    await command.ExecuteReaderAsync();
+
+                List<OrderResponse> orders =
+                    new List<OrderResponse>();
+
+                while (await reader.ReadAsync())
+                {
+                    orders.Add(ReadOrder(reader));
+                }
+
+                return Ok(new
+                {
+                    success = true,
+                    count = orders.Count,
+                    orders = orders
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(
+                    500,
+                    new
+                    {
+                        success = false,
+                        message = "Failed to load customer order history.",
                         error = ex.Message
                     });
             }
@@ -2236,6 +2415,91 @@ namespace QamishloRestaurantAPI.Controllers
         // =========================================================
         // NORMALIZE ORDER TYPE
         // =========================================================
+
+        // =========================================================
+        // DELIVERY POLYGON CHECK (longitude = X, latitude = Y)
+        // ZoneCoordinates format: [{ "lat": 36.1, "lng": 44.0 }, ...]
+        // =========================================================
+        private static bool IsPointInsideDeliveryPolygon(
+            double latitude,
+            double longitude,
+            string coordinatesJson)
+        {
+            try
+            {
+                using JsonDocument document = JsonDocument.Parse(coordinatesJson);
+                if (document.RootElement.ValueKind != JsonValueKind.Array)
+                    return false;
+
+                var points = new List<(double Lat, double Lng)>();
+
+                foreach (JsonElement point in document.RootElement.EnumerateArray())
+                {
+                    if (point.ValueKind != JsonValueKind.Object)
+                        return false;
+
+                    if (!TryGetCoordinate(point, "lat", out double lat) ||
+                        !TryGetCoordinate(point, "lng", out double lng))
+                        return false;
+
+                    if (!double.IsFinite(lat) || !double.IsFinite(lng) ||
+                        lat < -90 || lat > 90 || lng < -180 || lng > 180)
+                        return false;
+
+                    points.Add((lat, lng));
+                }
+
+                if (points.Count < 3)
+                    return false;
+
+                bool inside = false;
+                int j = points.Count - 1;
+
+                for (int i = 0; i < points.Count; i++)
+                {
+                    double xi = points[i].Lng;
+                    double yi = points[i].Lat;
+                    double xj = points[j].Lng;
+                    double yj = points[j].Lat;
+
+                    bool intersects =
+                        ((yi > latitude) != (yj > latitude)) &&
+                        (longitude < (xj - xi) * (latitude - yi) /
+                         (yj - yi) + xi);
+
+                    if (intersects)
+                        inside = !inside;
+
+                    j = i;
+                }
+
+                return inside;
+            }
+            catch (JsonException)
+            {
+                return false;
+            }
+        }
+
+        private static bool TryGetCoordinate(
+            JsonElement element,
+            string propertyName,
+            out double value)
+        {
+            value = 0;
+
+            foreach (JsonProperty property in element.EnumerateObject())
+            {
+                if (string.Equals(property.Name, propertyName,
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    return property.Value.ValueKind == JsonValueKind.Number &&
+                           property.Value.TryGetDouble(out value);
+                }
+            }
+
+            return false;
+        }
 
         private static string NormalizeOrderType(
             string? value)
