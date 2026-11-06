@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc;
 using MySqlConnector;
 using QamishloRestaurantAPI.Database;
 
@@ -382,6 +382,7 @@ namespace QamishloRestaurantAPI.Controllers
                 {
                     "Preparing",
                     "Ready",
+                    "OutForDelivery",
                     "Delivered"
                 };
 
@@ -468,6 +469,11 @@ namespace QamishloRestaurantAPI.Controllers
                     ||
                     (
                         currentStatus == "Ready" &&
+                        (status == "OutForDelivery" || status == "Delivered")
+                    )
+                    ||
+                    (
+                        currentStatus == "OutForDelivery" &&
                         status == "Delivered"
                     );
 
@@ -518,6 +524,21 @@ namespace QamishloRestaurantAPI.Controllers
 
                 int affected =
                     await updateCommand.ExecuteNonQueryAsync();
+
+                if (affected > 0)
+                {
+                    await using var notificationLookup = new MySqlCommand(
+                        "SELECT CustomerID FROM Orders WHERE OrderID=@orderID LIMIT 1", connection);
+                    notificationLookup.Parameters.AddWithValue("@orderID", orderId);
+                    var customerValue = await notificationLookup.ExecuteScalarAsync();
+                    if (customerValue != null && customerValue != DBNull.Value)
+                    {
+                        await using var notificationTx = await connection.BeginTransactionAsync();
+                        await NotificationsController.AddOrderStatusNotificationAsync(
+                            connection, notificationTx, Convert.ToInt32(customerValue), orderId, status);
+                        await notificationTx.CommitAsync();
+                    }
+                }
 
                 if (affected == 0)
                 {

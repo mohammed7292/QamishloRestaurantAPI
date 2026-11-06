@@ -75,6 +75,12 @@ namespace QamishloRestaurantAPI.Controllers
                 });
             }
 
+            string role = reader.GetString(reader.GetOrdinal("Role"));
+            if (role != "Admin" && role != "Manager")
+            {
+                return StatusCode(403, new { success = false, message = "هذه الصفحة متاحة للمدير فقط." });
+            }
+
             return Ok(new
             {
                 success = true,
@@ -544,7 +550,8 @@ namespace QamishloRestaurantAPI.Controllers
                 FROM users
                 WHERE Username = @Username
                   AND Password = @Password
-                  AND IsActive = 1;";
+                  AND IsActive = 1
+                  AND Role IN ('Admin', 'Manager');";
 
             await using var command =
                 new MySqlCommand(sql, connection);

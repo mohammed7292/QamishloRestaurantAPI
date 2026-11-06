@@ -14,7 +14,7 @@ public sealed class StaffPayrollController : ControllerBase
     {
         if (!await ManagerCredentialValidator.IsManagerAsync(Request)) return Unauthorized(new { success=false });
         await using var c=DatabaseManager.GetConnection();await c.OpenAsync();
-        const string sql="SELECT EmployeeID,FullName,Salary,IsActive,ShowInCustomerApp FROM RestaurantEmployees ORDER BY FullName";
+        const string sql="SELECT EmployeeID,FullName,Salary,IsActive,ShowInCustomerApp FROM restaurantemployees ORDER BY FullName";
         await using var cmd=new MySqlCommand(sql,c);await using var r=await cmd.ExecuteReaderAsync();var list=new List<object>();
         while(await r.ReadAsync()) list.Add(new{employeeID=r.GetInt32("EmployeeID"),fullName=r.GetString("FullName"),salary=r.GetDecimal("Salary"),isActive=r.GetBoolean("IsActive"),showInCustomerApp=r.GetBoolean("ShowInCustomerApp")});
         return Ok(new{success=true,employees=list});
@@ -26,7 +26,7 @@ public sealed class StaffPayrollController : ControllerBase
         if (!await ManagerCredentialValidator.IsManagerAsync(Request)) return Unauthorized(new{success=false});
         if(string.IsNullOrWhiteSpace(x.FullName)||x.Salary<0)return BadRequest(new{success=false});
         await using var c=DatabaseManager.GetConnection();await c.OpenAsync();
-        const string sql="INSERT INTO RestaurantEmployees(FullName,JobTitleEN,JobTitleAR,JobTitleKU,Salary,IsActive,ShowInCustomerApp) VALUES(@name,@en,@ar,@ku,@salary,@active,@show); SELECT LAST_INSERT_ID();";
+        const string sql="INSERT INTO restaurantemployees(FullName,JobTitleEN,JobTitleAR,JobTitleKU,Salary,IsActive,ShowInCustomerApp) VALUES(@name,@en,@ar,@ku,@salary,@active,@show); SELECT LAST_INSERT_ID();";
         await using var cmd=new MySqlCommand(sql,c);cmd.Parameters.AddWithValue("@name",x.FullName.Trim());cmd.Parameters.AddWithValue("@en",(object?)x.JobTitleEN??DBNull.Value);cmd.Parameters.AddWithValue("@ar",(object?)x.JobTitleAR??DBNull.Value);cmd.Parameters.AddWithValue("@ku",(object?)x.JobTitleKU??DBNull.Value);cmd.Parameters.AddWithValue("@salary",x.Salary);cmd.Parameters.AddWithValue("@active",x.IsActive);cmd.Parameters.AddWithValue("@show",x.ShowInCustomerApp);
         return Ok(new{success=true,employeeID=Convert.ToInt32(await cmd.ExecuteScalarAsync())});
     }
@@ -37,7 +37,7 @@ public sealed class StaffPayrollController : ControllerBase
         if (!await ManagerCredentialValidator.IsManagerAsync(Request)) return Unauthorized(new{success=false});
         if(id<=0||string.IsNullOrWhiteSpace(x.FullName)||x.Salary<0)return BadRequest(new{success=false});
         await using var c=DatabaseManager.GetConnection();await c.OpenAsync();
-        const string sql="UPDATE RestaurantEmployees SET FullName=@name,JobTitleEN=@en,JobTitleAR=@ar,JobTitleKU=@ku,Salary=@salary,IsActive=@active,ShowInCustomerApp=@show WHERE EmployeeID=@id";
+        const string sql="UPDATE restaurantemployees SET FullName=@name,JobTitleEN=@en,JobTitleAR=@ar,JobTitleKU=@ku,Salary=@salary,IsActive=@active,ShowInCustomerApp=@show WHERE EmployeeID=@id";
         await using var cmd=new MySqlCommand(sql,c);cmd.Parameters.AddWithValue("@id",id);cmd.Parameters.AddWithValue("@name",x.FullName.Trim());cmd.Parameters.AddWithValue("@en",(object?)x.JobTitleEN??DBNull.Value);cmd.Parameters.AddWithValue("@ar",(object?)x.JobTitleAR??DBNull.Value);cmd.Parameters.AddWithValue("@ku",(object?)x.JobTitleKU??DBNull.Value);cmd.Parameters.AddWithValue("@salary",x.Salary);cmd.Parameters.AddWithValue("@active",x.IsActive);cmd.Parameters.AddWithValue("@show",x.ShowInCustomerApp);
         return await cmd.ExecuteNonQueryAsync()==0?NotFound(new{success=false}):Ok(new{success=true});
     }
@@ -46,7 +46,7 @@ public sealed class StaffPayrollController : ControllerBase
     public async Task<IActionResult> Deactivate(int id)
     {
         if (!await ManagerCredentialValidator.IsManagerAsync(Request)) return Unauthorized(new{success=false});
-        await using var c=DatabaseManager.GetConnection();await c.OpenAsync();await using var cmd=new MySqlCommand("UPDATE RestaurantEmployees SET IsActive=0,ShowInCustomerApp=0 WHERE EmployeeID=@id",c);cmd.Parameters.AddWithValue("@id",id);
+        await using var c=DatabaseManager.GetConnection();await c.OpenAsync();await using var cmd=new MySqlCommand("UPDATE restaurantemployees SET IsActive=0,ShowInCustomerApp=0 WHERE EmployeeID=@id",c);cmd.Parameters.AddWithValue("@id",id);
         return await cmd.ExecuteNonQueryAsync()==0?NotFound(new{success=false}):Ok(new{success=true});
     }
 
@@ -70,7 +70,7 @@ public sealed class StaffPayrollController : ControllerBase
         if (!await ManagerCredentialValidator.IsManagerAsync(Request)) return Unauthorized(new{success=false});
         month=string.IsNullOrWhiteSpace(month)?ExpensesController.BaghdadNow().ToString("yyyy-MM"):month;
         await using var c=DatabaseManager.GetConnection();await c.OpenAsync();
-        const string sql="SELECT e.EmployeeID,e.FullName,e.Salary,COALESCE(SUM(CASE WHEN t.TransactionType='Bonus' THEN t.Amount ELSE 0 END),0) Bonus,COALESCE(SUM(CASE WHEN t.TransactionType IN ('Advance','Deduction') THEN t.Amount ELSE 0 END),0) Deductions,COALESCE(SUM(CASE WHEN t.TransactionType='Payment' THEN t.Amount ELSE 0 END),0) Paid FROM RestaurantEmployees e LEFT JOIN EmployeePayrollTransactions t ON t.EmployeeID=e.EmployeeID AND t.PayrollMonth=@month WHERE e.EmployeeID=@id GROUP BY e.EmployeeID,e.FullName,e.Salary";
+        const string sql="SELECT e.EmployeeID,e.FullName,e.Salary,COALESCE(SUM(CASE WHEN t.TransactionType='Bonus' THEN t.Amount ELSE 0 END),0) Bonus,COALESCE(SUM(CASE WHEN t.TransactionType IN ('Advance','Deduction') THEN t.Amount ELSE 0 END),0) Deductions,COALESCE(SUM(CASE WHEN t.TransactionType='Payment' THEN t.Amount ELSE 0 END),0) Paid FROM restaurantemployees e LEFT JOIN EmployeePayrollTransactions t ON t.EmployeeID=e.EmployeeID AND t.PayrollMonth=@month WHERE e.EmployeeID=@id GROUP BY e.EmployeeID,e.FullName,e.Salary";
         await using var cmd=new MySqlCommand(sql,c);cmd.Parameters.AddWithValue("@month",month);cmd.Parameters.AddWithValue("@id",id);await using var r=await cmd.ExecuteReaderAsync();
         if(!await r.ReadAsync())return NotFound(new{success=false});
         decimal salary=r.GetDecimal("Salary"),bonus=r.GetDecimal("Bonus"),deductions=r.GetDecimal("Deductions"),paid=r.GetDecimal("Paid");

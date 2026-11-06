@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc;
 using MySqlConnector;
 using QamishloRestaurantAPI.Database;
 using System;
@@ -133,16 +133,9 @@ namespace QamishloRestaurantAPI.Controllers
                 }
             }
 
-            // =====================================================
-            // DISCOUNT
-            // =====================================================
-
-            decimal discount = request.DiscountAmount;
-
-            if (discount < 0)
-            {
-                discount = 0;
-            }
+            // Discounts are calculated by the server from restaurantsettings.
+            // Never trust a customer-supplied discount amount.
+            decimal discount = 0m;
 
             try
             {
@@ -156,6 +149,109 @@ namespace QamishloRestaurantAPI.Controllers
 
                 try
                 {
+                    // =================================================
+                    // 0. VALIDATE RESTAURANT / CUSTOMER APP AVAILABILITY
+                    // =================================================
+                    const string availabilityQuery = @"
+                        SELECT IsCustomerAppEnabled, IsRestaurantOpen, IsDeliveryEnabled,
+                               OpeningTime, ClosingTime, DeliveryClosedMessage,
+                               FirstOrderDiscountEnabled, FirstOrderDiscountPercent
+                        FROM restaurantsettings
+                        ORDER BY SettingID
+                        LIMIT 1;";
+                    bool customerAppEnabled = true;
+                    bool restaurantOpen = true;
+                    bool deliveryEnabled = true;
+                    string? openingTime = null;
+                    string? closingTime = null;
+                    string? closedMessage = null;
+                    bool firstOrderDiscountEnabled = false;
+                    decimal firstOrderDiscountPercent = 0m;
+                    using (MySqlCommand settingsCommand = new MySqlCommand(availabilityQuery, connection, transaction))
+                    using (MySqlDataReader settingsReader = await settingsCommand.ExecuteReaderAsync())
+                    {
+                        if (await settingsReader.ReadAsync())
+                        {
+                            customerAppEnabled = Convert.ToBoolean(settingsReader["IsCustomerAppEnabled"]);
+                            restaurantOpen = Convert.ToBoolean(settingsReader["IsRestaurantOpen"]);
+                            deliveryEnabled = Convert.ToBoolean(settingsReader["IsDeliveryEnabled"]);
+                            openingTime = settingsReader.IsDBNull(settingsReader.GetOrdinal("OpeningTime")) ? null : settingsReader["OpeningTime"].ToString();
+                            closingTime = settingsReader.IsDBNull(settingsReader.GetOrdinal("ClosingTime")) ? null : settingsReader["ClosingTime"].ToString();
+                            closedMessage = settingsReader.IsDBNull(settingsReader.GetOrdinal("DeliveryClosedMessage")) ? null : settingsReader["DeliveryClosedMessage"].ToString();
+                            firstOrderDiscountEnabled = Convert.ToBoolean(settingsReader["FirstOrderDiscountEnabled"]);
+                            firstOrderDiscountPercent = Convert.ToDecimal(settingsReader["FirstOrderDiscountPercent"]);
+                        }
+                    }
+
+                    if (!customerAppEnabled)
+                    {
+                        await transaction.RollbackAsync();
+                        return StatusCode(503, new
+                        {
+                            success = false,
+                            code = "CUSTOMER_APP_DISABLED",
+                            message = string.IsNullOrWhiteSpace(closedMessage)
+                                ? $"The customer app is temporarily unavailable. Service hours: {openingTime ?? "--:--"} - {closingTime ?? "--:--"}."
+                                : closedMessage,
+                            openingTime,
+                            closingTime
+                        });
+                    }
+
+                    if (!restaurantOpen)
+                    {
+                        await transaction.RollbackAsync();
+                        return BadRequest(new
+                        {
+                            success = false,
+                            code = "RESTAURANT_CLOSED",
+                            message = string.IsNullOrWhiteSpace(closedMessage)
+                                ? $"The restaurant is currently closed. Service hours: {openingTime ?? "--:--"} - {closingTime ?? "--:--"}."
+                                : closedMessage,
+                            openingTime,
+                            closingTime
+                        });
+                    }
+
+                    if (orderType == "Delivery" && !deliveryEnabled)
+                    {
+                        await transaction.RollbackAsync();
+                        return BadRequest(new
+                        {
+                            success = false,
+                            code = "DELIVERY_DISABLED",
+                            message = string.IsNullOrWhiteSpace(closedMessage)
+                                ? $"Delivery is currently unavailable. Available from {openingTime ?? "--:--"} to {closingTime ?? "--:--"}."
+                                : closedMessage,
+                            openingTime,
+                            closingTime
+                        });
+                    }
+
+                    if (orderType == "Delivery" &&
+                        TimeSpan.TryParse(openingTime, out TimeSpan deliveryOpens) &&
+                        TimeSpan.TryParse(closingTime, out TimeSpan deliveryCloses))
+                    {
+                        TimeSpan baghdadTime = ExpensesController.BaghdadNow().TimeOfDay;
+                        bool withinHours = deliveryOpens <= deliveryCloses
+                            ? baghdadTime >= deliveryOpens && baghdadTime <= deliveryCloses
+                            : baghdadTime >= deliveryOpens || baghdadTime <= deliveryCloses;
+                        if (!withinHours)
+                        {
+                            await transaction.RollbackAsync();
+                            return BadRequest(new
+                            {
+                                success = false,
+                                code = "OUTSIDE_DELIVERY_HOURS",
+                                message = string.IsNullOrWhiteSpace(closedMessage)
+                                    ? $"Delivery is available from {openingTime} to {closingTime}."
+                                    : closedMessage,
+                                openingTime,
+                                closingTime
+                            });
+                        }
+                    }
+
                     // =================================================
                     // 1. FIND OR CREATE CUSTOMER
                     // =================================================
@@ -356,6 +452,27 @@ namespace QamishloRestaurantAPI.Controllers
                     }
 
                     // =================================================
+                    // 2B. APPLY SERVER-VERIFIED FIRST-ORDER DISCOUNT
+                    // =================================================
+                    if (firstOrderDiscountEnabled && firstOrderDiscountPercent > 0m)
+                    {
+                        const string previousOrdersQuery = @"
+                            SELECT COUNT(*) FROM orders
+                            WHERE CustomerID = @CustomerID
+                              AND Status <> 'Cancelled';";
+                        using (MySqlCommand previousOrdersCommand = new MySqlCommand(previousOrdersQuery, connection, transaction))
+                        {
+                            previousOrdersCommand.Parameters.AddWithValue("@CustomerID", customerId);
+                            int previousOrders = Convert.ToInt32(await previousOrdersCommand.ExecuteScalarAsync());
+                            if (previousOrders == 0)
+                            {
+                                decimal safePercent = Math.Clamp(firstOrderDiscountPercent, 0m, 100m);
+                                discount = Math.Round(subtotal * safePercent / 100m, 2, MidpointRounding.AwayFromZero);
+                            }
+                        }
+                    }
+
+                    // =================================================
                     // 3. VALIDATE DELIVERY ZONE + MINIMUM ORDER
                     // Server values are authoritative; never trust the fee sent by the app.
                     // =================================================
@@ -498,6 +615,7 @@ namespace QamishloRestaurantAPI.Controllers
                             UserID,
                             DeliveryZoneID,
                             OrderDate,
+                            BusinessDate,
                             OrderType,
                             Status,
                             Subtotal,
@@ -505,6 +623,8 @@ namespace QamishloRestaurantAPI.Controllers
                             DiscountAmount,
                             TotalAmount,
                             DeliveryAddress,
+                            CustomerLatitude,
+                            CustomerLongitude,
                             Notes
                         )
                         VALUES
@@ -512,7 +632,8 @@ namespace QamishloRestaurantAPI.Controllers
                             @CustomerID,
                             @UserID,
                             @DeliveryZoneID,
-                            NOW(),
+                            @OrderDate,
+                            @BusinessDate,
                             @OrderType,
                             'New',
                             @Subtotal,
@@ -520,6 +641,8 @@ namespace QamishloRestaurantAPI.Controllers
                             @DiscountAmount,
                             @TotalAmount,
                             @DeliveryAddress,
+                            @Latitude,
+                            @Longitude,
                             @Notes
                         );";
 
@@ -550,6 +673,10 @@ namespace QamishloRestaurantAPI.Controllers
                             "@DeliveryZoneID",
                             (object?)deliveryZoneId ?? DBNull.Value);
 
+                        DateTime baghdadOrderDate = ExpensesController.BaghdadNow();
+                        command.Parameters.AddWithValue("@OrderDate", baghdadOrderDate);
+                        command.Parameters.AddWithValue("@BusinessDate", ExpensesController.BusinessDate(baghdadOrderDate));
+
                         command.Parameters.AddWithValue(
                             "@OrderType",
                             orderType);
@@ -576,6 +703,9 @@ namespace QamishloRestaurantAPI.Controllers
                                 request.Address)
                                 ? DBNull.Value
                                 : request.Address.Trim());
+
+                        command.Parameters.AddWithValue("@Latitude", (object?)request.Latitude ?? DBNull.Value);
+                        command.Parameters.AddWithValue("@Longitude", (object?)request.Longitude ?? DBNull.Value);
 
                         command.Parameters.AddWithValue(
                             "@Notes",
@@ -1674,6 +1804,7 @@ namespace QamishloRestaurantAPI.Controllers
                 string checkQuery = @"
                     SELECT
                         OrderID,
+                        CustomerID,
                         OrderType,
                         Status
                     FROM orders
@@ -1682,6 +1813,7 @@ namespace QamishloRestaurantAPI.Controllers
 
                 string? orderType = null;
                 string? oldStatus = null;
+                int? notificationCustomerId = null;
 
                 using (
                     MySqlCommand command =
@@ -1709,6 +1841,9 @@ namespace QamishloRestaurantAPI.Controllers
                     orderType =
                         reader.GetString(
                             "OrderType");
+
+                    notificationCustomerId = reader.IsDBNull(reader.GetOrdinal("CustomerID"))
+                        ? null : reader.GetInt32("CustomerID");
 
                     oldStatus =
                         reader.GetString(
@@ -1767,6 +1902,14 @@ namespace QamishloRestaurantAPI.Controllers
                         id);
 
                     await command.ExecuteNonQueryAsync();
+                }
+
+                if (notificationCustomerId.HasValue && oldStatus != status)
+                {
+                    await using var notificationTx = await connection.BeginTransactionAsync();
+                    await NotificationsController.AddOrderStatusNotificationAsync(
+                        connection, notificationTx, notificationCustomerId.Value, id, status);
+                    await notificationTx.CommitAsync();
                 }
 
                 return Ok(new
@@ -1887,6 +2030,7 @@ namespace QamishloRestaurantAPI.Controllers
 
                 string? orderType = null;
                 string? oldStatus = null;
+                int? notificationCustomerId = null;
                 int? currentWorkerID = null;
 
                 using (
@@ -2604,6 +2748,10 @@ namespace QamishloRestaurantAPI.Controllers
                 return "Cancelled";
             }
 
+            if (text.Equals("OutForDelivery", StringComparison.OrdinalIgnoreCase) ||
+                text.Equals("Out for delivery", StringComparison.OrdinalIgnoreCase))
+                return "OutForDelivery";
+
             // Arabic
             if (text == "جديد")
                 return "New";
@@ -2619,6 +2767,9 @@ namespace QamishloRestaurantAPI.Controllers
 
             if (text == "ملغي")
                 return "Cancelled";
+
+            if (text == "خرج للتوصيل" || text == "بالطريق إليك")
+                return "OutForDelivery";
 
             // Kurdish
             if (text == "نوێ")
