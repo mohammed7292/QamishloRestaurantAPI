@@ -8,6 +8,31 @@ namespace QamishloRestaurantAPI.Controllers
     [Route("api/[controller]")]
     public class deliveryworkersController : ControllerBase
     {
+        private static async Task<bool> IsAuthenticatedWorkerAsync(
+            MySqlConnection connection,
+            int workerId,
+            HttpRequest request)
+        {
+            string username = request.Headers["X-Delivery-Worker-Username"].ToString();
+            string password = request.Headers["X-Delivery-Worker-Password"].ToString();
+            if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
+                return false;
+
+            const string sql = """
+                SELECT COUNT(*)
+                FROM deliveryworkers
+                WHERE DeliveryWorkerID = @id
+                  AND Username = @username
+                  AND Password = @password
+                  AND IsActive = 1;
+                """;
+            await using var command = new MySqlCommand(sql, connection);
+            command.Parameters.AddWithValue("@id", workerId);
+            command.Parameters.AddWithValue("@username", username.Trim());
+            command.Parameters.AddWithValue("@password", password);
+            return Convert.ToInt32(await command.ExecuteScalarAsync()) > 0;
+        }
+
         // =====================================================
         // LOGIN
         // =====================================================
@@ -155,6 +180,9 @@ namespace QamishloRestaurantAPI.Controllers
                     DatabaseManager.GetConnection();
 
                 await connection.OpenAsync();
+
+                if (!await IsAuthenticatedWorkerAsync(connection, workerId, Request))
+                    return Unauthorized(new { success = false, message = "Worker login is required or expired." });
 
                 string query = """
                     SELECT
@@ -406,6 +434,8 @@ namespace QamishloRestaurantAPI.Controllers
 
                 await connection.OpenAsync();
 
+                if (!await IsAuthenticatedWorkerAsync(connection, workerId, Request))
+                    return Unauthorized(new { success = false, message = "Worker login is required or expired." });
 
                 // =================================================
                 // CHECK ORDER
@@ -600,6 +630,9 @@ namespace QamishloRestaurantAPI.Controllers
                     DatabaseManager.GetConnection();
 
                 await connection.OpenAsync();
+
+                if (!await IsAuthenticatedWorkerAsync(connection, workerId, Request))
+                    return Unauthorized(new { success = false, message = "Worker login is required or expired." });
 
                 string query = """
                     SELECT

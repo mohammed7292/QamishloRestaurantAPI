@@ -1666,8 +1666,7 @@ namespace QamishloRestaurantAPI.Controllers
                 });
             }
 
-            if (request == null ||
-                string.IsNullOrWhiteSpace(request.Status))
+            if (request == null || string.IsNullOrWhiteSpace(request.Status))
             {
                 return BadRequest(new
                 {
@@ -1676,170 +1675,21 @@ namespace QamishloRestaurantAPI.Controllers
                 });
             }
 
-            string status =
-                NormalizeStatus(request.Status);
-
+            string status = NormalizeStatus(request.Status);
             if (status == "")
             {
                 return BadRequest(new
                 {
                     success = false,
-                    message =
-                        "Invalid status. Allowed: New, Preparing, Ready, Delivered, Cancelled."
+                    message = "Invalid status. Allowed: New, Preparing, Ready, Delivered, Cancelled."
                 });
             }
 
-            try
-            {
-                using MySqlConnection connection =
-                    DatabaseManager.GetConnection();
-
-                await connection.OpenAsync();
-
-                // =================================================
-                // CHECK ORDER
-                // =================================================
-
-                string checkQuery = @"
-                    SELECT
-                        OrderID,
-                        CustomerID,
-                        OrderType,
-                        Status
-                    FROM orders
-                    WHERE OrderID = @OrderID
-                    LIMIT 1;";
-
-                string? orderType = null;
-                string? oldStatus = null;
-                int? notificationCustomerId = null;
-
-                using (
-                    MySqlCommand command =
-                        new MySqlCommand(
-                            checkQuery,
-                            connection))
-                {
-                    command.Parameters.AddWithValue(
-                        "@OrderID",
-                        id);
-
-                    using MySqlDataReader reader =
-                        await command.ExecuteReaderAsync();
-
-                    if (!await reader.ReadAsync())
-                    {
-                        return NotFound(new
-                        {
-                            success = false,
-                            message =
-                                $"Order #{id} was not found."
-                        });
-                    }
-
-                    orderType =
-                        reader.GetString(
-                            "OrderType");
-
-                    notificationCustomerId = reader.IsDBNull(reader.GetOrdinal("CustomerID"))
-                        ? null : reader.GetInt32("CustomerID");
-
-                    oldStatus =
-                        reader.GetString(
-                            "Status");
-                }
-
-                // =================================================
-                // STATUS RULES
-                // =================================================
-
-                if (oldStatus == "Cancelled" &&
-                    status != "Cancelled")
-                {
-                    return BadRequest(new
-                    {
-                        success = false,
-                        message =
-                            "A cancelled order cannot be reopened."
-                    });
-                }
-
-                if (oldStatus == "Delivered" &&
-                    status != "Delivered")
-                {
-                    return BadRequest(new
-                    {
-                        success = false,
-                        message =
-                            "A delivered order cannot change status."
-                    });
-                }
-
-                // =================================================
-                // UPDATE
-                // =================================================
-
-                string updateQuery = @"
-                    UPDATE orders
-                    SET
-                        Status = @Status,
-                        UpdatedAt = CURRENT_TIMESTAMP
-                    WHERE OrderID = @OrderID;";
-
-                using (
-                    MySqlCommand command =
-                        new MySqlCommand(
-                            updateQuery,
-                            connection))
-                {
-                    command.Parameters.AddWithValue(
-                        "@Status",
-                        status);
-
-                    command.Parameters.AddWithValue(
-                        "@OrderID",
-                        id);
-
-                    await command.ExecuteNonQueryAsync();
-                }
-
-                if (notificationCustomerId.HasValue && oldStatus != status)
-                {
-                    await using var notificationTx = await connection.BeginTransactionAsync();
-                    await NotificationsController.AddOrderStatusNotificationAsync(
-                        connection, notificationTx, notificationCustomerId.Value, id, status);
-                    await notificationTx.CommitAsync();
-                }
-
-                return Ok(new
-                {
-                    success = true,
-
-                    orderId = id,
-
-                    orderType = orderType,
-
-                    oldStatus = oldStatus,
-
-                    status = status,
-
-                    message =
-                        "Order status updated successfully."
-                });
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(
-                    500,
-                    new
-                    {
-                        success = false,
-                        message =
-                            "Failed to update order status.",
-                        error =
-                            "تعذر إكمال العملية حالياً. يرجى المحاولة لاحقاً."
-                    });
-            }
+            // IMPORTANT: always use the shared status workflow. When a new
+            // Delivery order becomes Preparing, it atomically assigns an
+            // active delivery worker. The driver's web app lists orders by
+            // DeliveryWorkerID, so bypassing this method left the order out.
+            return await UpdateStatusInternal(id, status);
         }
 
         // =========================================================
