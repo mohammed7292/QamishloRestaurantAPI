@@ -7,7 +7,7 @@ namespace QamishloRestaurantAPI.Controllers;
 
 [ApiController]
 [Route("api/deliveryzones")]
-public sealed class DeliveryZonesController : ControllerBase
+public sealed class deliveryzonesController : ControllerBase
 {
     [HttpGet]
     public async Task<IActionResult> Get([FromQuery] bool includeInactive = false)
@@ -20,7 +20,7 @@ public sealed class DeliveryZonesController : ControllerBase
             var scalar = await setting.ExecuteScalarAsync();
             if (scalar is not null && scalar != DBNull.Value) minimum = Convert.ToDecimal(scalar);
         }
-        var sql = "SELECT DeliveryZoneID,ZoneName,DeliveryFee,EstimatedMinutes,Description,IsActive,ZoneCoordinates FROM DeliveryZones " +
+        var sql = "SELECT DeliveryZoneID,ZoneName,DeliveryFee,EstimatedMinutes,Description,IsActive,ZoneCoordinates FROM deliveryzones " +
                   (includeInactive ? "" : "WHERE IsActive=1 ") + "ORDER BY DeliveryZoneID DESC";
         var zones = new List<object>();
         await using (var cmd = new MySqlCommand(sql, connection))
@@ -48,7 +48,7 @@ public sealed class DeliveryZonesController : ControllerBase
             return BadRequest(new { success = false, message = "اسم المنطقة والسعر والإحداثيات مطلوبة." });
         await using var connection = DatabaseManager.GetConnection();
         await connection.OpenAsync();
-        const string sql = "INSERT INTO DeliveryZones(ZoneName,DeliveryFee,EstimatedMinutes,Description,IsActive,ZoneCoordinates) VALUES(@name,@fee,@minutes,@description,@active,@coordinates); SELECT LAST_INSERT_ID();";
+        const string sql = "INSERT INTO deliveryzones(ZoneName,DeliveryFee,EstimatedMinutes,Description,IsActive,ZoneCoordinates) VALUES(@name,@fee,@minutes,@description,@active,@coordinates); SELECT LAST_INSERT_ID();";
         await using var cmd = new MySqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@name", request.ZoneName.Trim());
         cmd.Parameters.AddWithValue("@fee", request.DeliveryFee);
@@ -68,7 +68,7 @@ public sealed class DeliveryZonesController : ControllerBase
             return BadRequest(new { success = false, message = "بيانات المنطقة غير صحيحة." });
         await using var connection = DatabaseManager.GetConnection();
         await connection.OpenAsync();
-        const string sql = "UPDATE DeliveryZones SET ZoneName=@name,DeliveryFee=@fee,EstimatedMinutes=@minutes,Description=@description,IsActive=@active,ZoneCoordinates=@coordinates WHERE DeliveryZoneID=@id";
+        const string sql = "UPDATE deliveryzones SET ZoneName=@name,DeliveryFee=@fee,EstimatedMinutes=@minutes,Description=@description,IsActive=@active,ZoneCoordinates=@coordinates WHERE DeliveryZoneID=@id";
         await using var cmd = new MySqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@id", id); cmd.Parameters.AddWithValue("@name", request.ZoneName.Trim());
         cmd.Parameters.AddWithValue("@fee", request.DeliveryFee); cmd.Parameters.AddWithValue("@minutes", request.EstimatedMinutes is null ? DBNull.Value : request.EstimatedMinutes);
@@ -81,7 +81,7 @@ public sealed class DeliveryZonesController : ControllerBase
     {
         if (!await ManagerCredentialValidator.IsManagerAsync(Request)) return Unauthorized(new { success = false, message = "Manager login required." });
         await using var connection = DatabaseManager.GetConnection(); await connection.OpenAsync();
-        await using var cmd = new MySqlCommand("UPDATE DeliveryZones SET IsActive=0 WHERE DeliveryZoneID=@id", connection);
+        await using var cmd = new MySqlCommand("UPDATE deliveryzones SET IsActive=0 WHERE DeliveryZoneID=@id", connection);
         cmd.Parameters.AddWithValue("@id", id);
         return await cmd.ExecuteNonQueryAsync() == 0 ? NotFound(new { success = false }) : Ok(new { success = true });
     }
