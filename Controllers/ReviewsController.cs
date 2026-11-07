@@ -1,4 +1,4 @@
-﻿
+
 using Microsoft.AspNetCore.Mvc;
 using MySqlConnector;
 using QamishloRestaurantAPI.Database;
@@ -65,7 +65,7 @@ namespace QamishloRestaurantAPI.Controllers
                 {
                     success = false,
                     message = "Could not load employee reviews.",
-                    error = ex.Message
+                    error = "تعذر إكمال العملية بسبب خطأ داخلي."
                 });
             }
         }
@@ -92,7 +92,7 @@ namespace QamishloRestaurantAPI.Controllers
                         WorkerRating,
                         WorkerComment,
                         CreatedAt
-                    FROM OrderRatings
+                    FROM orderratings
                     ORDER BY CreatedAt DESC;";
 
                 await using var command = new MySqlCommand(sql, connection);
@@ -128,7 +128,7 @@ namespace QamishloRestaurantAPI.Controllers
                 {
                     success = false,
                     message = "Could not load order reviews.",
-                    error = ex.Message
+                    error = "تعذر إكمال العملية بسبب خطأ داخلي."
                 });
             }
         }
@@ -172,7 +172,7 @@ namespace QamishloRestaurantAPI.Controllers
                         COUNT(*) AS TotalReviews,
                         COALESCE(AVG(FoodRating), 0) AS AverageFoodRating,
                         COALESCE(AVG(WorkerRating), 0) AS AverageWorkerRating
-                    FROM OrderRatings;";
+                    FROM orderratings;";
 
                 await using var orderCommand =
                     new MySqlCommand(orderSql, connection);
@@ -202,7 +202,7 @@ namespace QamishloRestaurantAPI.Controllers
                 {
                     success = false,
                     message = "Could not load review statistics.",
-                    error = ex.Message
+                    error = "تعذر إكمال العملية بسبب خطأ داخلي."
                 });
             }
         }
@@ -370,7 +370,7 @@ namespace QamishloRestaurantAPI.Controllers
                 {
                     success = false,
                     message = "Could not submit employee review.",
-                    error = ex.Message
+                    error = "تعذر إكمال العملية بسبب خطأ داخلي."
                 });
             }
         }
@@ -489,7 +489,7 @@ namespace QamishloRestaurantAPI.Controllers
 
                 const string duplicateSql = @"
                     SELECT RatingID
-                    FROM OrderRatings
+                    FROM orderratings
                     WHERE OrderID = @OrderID
                       AND CustomerID = @CustomerID
                     LIMIT 1;";
@@ -526,7 +526,7 @@ namespace QamishloRestaurantAPI.Controllers
                 }
 
                 const string insertSql = @"
-                    INSERT INTO OrderRatings
+                    INSERT INTO orderratings
                     (
                         OrderID,
                         CustomerID,
@@ -596,7 +596,7 @@ namespace QamishloRestaurantAPI.Controllers
                 {
                     success = false,
                     message = "Could not submit order rating.",
-                    error = ex.Message
+                    error = "تعذر إكمال العملية بسبب خطأ داخلي."
                 });
             }
         }

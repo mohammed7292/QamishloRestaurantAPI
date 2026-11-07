@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc;
 using MySqlConnector;
 using QamishloRestaurantAPI.Database;
 using System;
@@ -516,8 +516,7 @@ namespace QamishloRestaurantAPI.Controllers
             }
 
             string photoUrl =
-                $"{Request.Scheme}://{Request.Host}" +
-                $"{Request.PathBase}/uploads/employees/{fileName}";
+                $"/uploads/employees/{fileName}";
 
             return Ok(new
             {

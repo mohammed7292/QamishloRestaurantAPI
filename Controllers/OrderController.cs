@@ -34,24 +34,6 @@ namespace QamishloRestaurantAPI.Controllers
                 });
             }
 
-            if (string.IsNullOrWhiteSpace(request.CustomerName))
-            {
-                return BadRequest(new
-                {
-                    success = false,
-                    message = "Customer name is required."
-                });
-            }
-
-            if (string.IsNullOrWhiteSpace(request.CustomerPhone))
-            {
-                return BadRequest(new
-                {
-                    success = false,
-                    message = "Customer phone is required."
-                });
-            }
-
             if (request.Items == null ||
                 request.Items.Count == 0)
             {
@@ -253,145 +235,62 @@ namespace QamishloRestaurantAPI.Controllers
                     }
 
                     // =================================================
-                    // 1. FIND OR CREATE CUSTOMER
+                    // 1. FIND OR CREATE CUSTOMER (OPTIONAL FOR WALK-IN ORDERS)
                     // =================================================
+                    int? customerId = null;
+                    string customerName = request.CustomerName?.Trim() ?? "";
+                    string customerPhone = request.CustomerPhone?.Trim() ?? "";
 
-                    int customerId = 0;
-
-                    string findCustomerQuery = @"
-                        SELECT CustomerID
-                        FROM customers
-                        WHERE Phone = @Phone
-                        LIMIT 1;";
-
-                    using (
-                        MySqlCommand command =
-                            new MySqlCommand(
-                                findCustomerQuery,
-                                connection,
-                                transaction))
+                    if (!string.IsNullOrWhiteSpace(customerPhone))
                     {
-                        command.Parameters.AddWithValue(
-                            "@Phone",
-                            request.CustomerPhone.Trim());
-
-                        object? result =
-                            await command.ExecuteScalarAsync();
-
-                        if (result != null &&
-                            result != DBNull.Value)
+                        const string findCustomerQuery = @"
+                            SELECT CustomerID FROM customers
+                            WHERE Phone = @Phone LIMIT 1;";
+                        using (var findCommand = new MySqlCommand(findCustomerQuery, connection, transaction))
                         {
-                            customerId =
-                                Convert.ToInt32(result);
+                            findCommand.Parameters.AddWithValue("@Phone", customerPhone);
+                            object? found = await findCommand.ExecuteScalarAsync();
+                            if (found != null && found != DBNull.Value)
+                                customerId = Convert.ToInt32(found);
+                        }
+
+                        if (!customerId.HasValue)
+                        {
+                            const string insertCustomerQuery = @"
+                                INSERT INTO customers(FullName,Phone,Address,Notes,IsActive)
+                                VALUES(@FullName,@Phone,@Address,@Notes,1);";
+                            using var insertCustomer = new MySqlCommand(insertCustomerQuery, connection, transaction);
+                            insertCustomer.Parameters.AddWithValue("@FullName", string.IsNullOrWhiteSpace(customerName) ? "Customer" : customerName);
+                            insertCustomer.Parameters.AddWithValue("@Phone", customerPhone);
+                            insertCustomer.Parameters.AddWithValue("@Address", string.IsNullOrWhiteSpace(request.Address) ? DBNull.Value : request.Address.Trim());
+                            insertCustomer.Parameters.AddWithValue("@Notes", string.IsNullOrWhiteSpace(request.Notes) ? DBNull.Value : request.Notes.Trim());
+                            await insertCustomer.ExecuteNonQueryAsync();
+                            customerId = Convert.ToInt32(insertCustomer.LastInsertedId);
+                        }
+                        else if (!string.IsNullOrWhiteSpace(customerName))
+                        {
+                            const string updateCustomerQuery = @"
+                                UPDATE customers SET FullName=@FullName,Address=@Address,Notes=@Notes,IsActive=1
+                                WHERE CustomerID=@CustomerID;";
+                            using var updateCustomer = new MySqlCommand(updateCustomerQuery, connection, transaction);
+                            updateCustomer.Parameters.AddWithValue("@FullName", customerName);
+                            updateCustomer.Parameters.AddWithValue("@Address", string.IsNullOrWhiteSpace(request.Address) ? DBNull.Value : request.Address.Trim());
+                            updateCustomer.Parameters.AddWithValue("@Notes", string.IsNullOrWhiteSpace(request.Notes) ? DBNull.Value : request.Notes.Trim());
+                            updateCustomer.Parameters.AddWithValue("@CustomerID", customerId.Value);
+                            await updateCustomer.ExecuteNonQueryAsync();
                         }
                     }
-
-                    // =================================================
-                    // CREATE CUSTOMER
-                    // =================================================
-
-                    if (customerId == 0)
+                    else if (!string.IsNullOrWhiteSpace(customerName))
                     {
-                        string insertCustomerQuery = @"
-                            INSERT INTO customers
-                            (
-                                FullName,
-                                Phone,
-                                Address,
-                                Notes,
-                                IsActive
-                            )
-                            VALUES
-                            (
-                                @FullName,
-                                @Phone,
-                                @Address,
-                                @Notes,
-                                1
-                            );";
-
-                        using (
-                            MySqlCommand command =
-                                new MySqlCommand(
-                                    insertCustomerQuery,
-                                    connection,
-                                    transaction))
-                        {
-                            command.Parameters.AddWithValue(
-                                "@FullName",
-                                request.CustomerName.Trim());
-
-                            command.Parameters.AddWithValue(
-                                "@Phone",
-                                request.CustomerPhone.Trim());
-
-                            command.Parameters.AddWithValue(
-                                "@Address",
-                                string.IsNullOrWhiteSpace(
-                                    request.Address)
-                                    ? DBNull.Value
-                                    : request.Address.Trim());
-
-                            command.Parameters.AddWithValue(
-                                "@Notes",
-                                string.IsNullOrWhiteSpace(
-                                    request.Notes)
-                                    ? DBNull.Value
-                                    : request.Notes.Trim());
-
-                            await command.ExecuteNonQueryAsync();
-
-                            customerId =
-                                Convert.ToInt32(
-                                    command.LastInsertedId);
-                        }
-                    }
-                    else
-                    {
-                        // =================================================
-                        // UPDATE CUSTOMER INFORMATION
-                        // =================================================
-
-                        string updateCustomerQuery = @"
-                            UPDATE customers
-                            SET
-                                FullName = @FullName,
-                                Address = @Address,
-                                Notes = @Notes,
-                                IsActive = 1
-                            WHERE CustomerID = @CustomerID;";
-
-                        using (
-                            MySqlCommand command =
-                                new MySqlCommand(
-                                    updateCustomerQuery,
-                                    connection,
-                                    transaction))
-                        {
-                            command.Parameters.AddWithValue(
-                                "@FullName",
-                                request.CustomerName.Trim());
-
-                            command.Parameters.AddWithValue(
-                                "@Address",
-                                string.IsNullOrWhiteSpace(
-                                    request.Address)
-                                    ? DBNull.Value
-                                    : request.Address.Trim());
-
-                            command.Parameters.AddWithValue(
-                                "@Notes",
-                                string.IsNullOrWhiteSpace(
-                                    request.Notes)
-                                    ? DBNull.Value
-                                    : request.Notes.Trim());
-
-                            command.Parameters.AddWithValue(
-                                "@CustomerID",
-                                customerId);
-
-                            await command.ExecuteNonQueryAsync();
-                        }
+                        const string insertNamedWalkIn = @"
+                            INSERT INTO customers(FullName,Phone,Address,Notes,IsActive)
+                            VALUES(@FullName,NULL,@Address,@Notes,1);";
+                        using var insertCustomer = new MySqlCommand(insertNamedWalkIn, connection, transaction);
+                        insertCustomer.Parameters.AddWithValue("@FullName", customerName);
+                        insertCustomer.Parameters.AddWithValue("@Address", string.IsNullOrWhiteSpace(request.Address) ? DBNull.Value : request.Address.Trim());
+                        insertCustomer.Parameters.AddWithValue("@Notes", string.IsNullOrWhiteSpace(request.Notes) ? DBNull.Value : request.Notes.Trim());
+                        await insertCustomer.ExecuteNonQueryAsync();
+                        customerId = Convert.ToInt32(insertCustomer.LastInsertedId);
                     }
 
                     // =================================================
@@ -454,7 +353,7 @@ namespace QamishloRestaurantAPI.Controllers
                     // =================================================
                     // 2B. APPLY SERVER-VERIFIED FIRST-ORDER DISCOUNT
                     // =================================================
-                    if (firstOrderDiscountEnabled && firstOrderDiscountPercent > 0m)
+                    if (customerId.HasValue && firstOrderDiscountEnabled && firstOrderDiscountPercent > 0m)
                     {
                         const string previousOrdersQuery = @"
                             SELECT COUNT(*) FROM orders
@@ -462,7 +361,7 @@ namespace QamishloRestaurantAPI.Controllers
                               AND Status <> 'Cancelled';";
                         using (MySqlCommand previousOrdersCommand = new MySqlCommand(previousOrdersQuery, connection, transaction))
                         {
-                            previousOrdersCommand.Parameters.AddWithValue("@CustomerID", customerId);
+                            previousOrdersCommand.Parameters.AddWithValue("@CustomerID", customerId.Value);
                             int previousOrders = Convert.ToInt32(await previousOrdersCommand.ExecuteScalarAsync());
                             if (previousOrders == 0)
                             {
@@ -655,7 +554,7 @@ namespace QamishloRestaurantAPI.Controllers
                     {
                         command.Parameters.AddWithValue(
                             "@CustomerID",
-                            customerId);
+                            (object?)customerId ?? DBNull.Value);
 
                         // =================================================
                         // CUSTOMER APP orders
@@ -850,7 +749,7 @@ namespace QamishloRestaurantAPI.Controllers
                     {
                         success = false,
                         message = "Failed to create order.",
-                        error = ex.Message
+                        error = "تعذر إكمال العملية بسبب خطأ داخلي."
                     });
             }
         }
@@ -1053,7 +952,7 @@ namespace QamishloRestaurantAPI.Controllers
                     {
                         success = false,
                         message = "Failed to load orders.",
-                        error = ex.Message
+                        error = "تعذر إكمال العملية بسبب خطأ داخلي."
                     });
             }
         }
@@ -1154,7 +1053,7 @@ namespace QamishloRestaurantAPI.Controllers
                     {
                         success = false,
                         message = "Failed to load customer order history.",
-                        error = ex.Message
+                        error = "تعذر إكمال العملية بسبب خطأ داخلي."
                     });
             }
         }
@@ -1294,7 +1193,7 @@ namespace QamishloRestaurantAPI.Controllers
                         success = false,
                         message =
                             "Failed to load delivery orders.",
-                        error = ex.Message
+                        error = "تعذر إكمال العملية بسبب خطأ داخلي."
                     });
             }
         }
@@ -1542,7 +1441,7 @@ namespace QamishloRestaurantAPI.Controllers
                         message =
                             "Failed to load order.",
                         error =
-                            ex.Message
+                            "تعذر إكمال العملية حالياً. يرجى المحاولة لاحقاً."
                     });
             }
         }
@@ -1743,7 +1642,7 @@ namespace QamishloRestaurantAPI.Controllers
                         message =
                             "Failed to load order tracking.",
                         error =
-                            ex.Message
+                            "تعذر إكمال العملية حالياً. يرجى المحاولة لاحقاً."
                     });
             }
         }
@@ -1938,7 +1837,7 @@ namespace QamishloRestaurantAPI.Controllers
                         message =
                             "Failed to update order status.",
                         error =
-                            ex.Message
+                            "تعذر إكمال العملية حالياً. يرجى المحاولة لاحقاً."
                     });
             }
         }
@@ -2334,7 +2233,7 @@ namespace QamishloRestaurantAPI.Controllers
                         message =
                             "Failed to update order status.",
                         error =
-                            ex.Message
+                            "تعذر إكمال العملية حالياً. يرجى المحاولة لاحقاً."
                     });
             }
         }
@@ -2797,9 +2696,9 @@ namespace QamishloRestaurantAPI.Controllers
 
     public class CreateOrderRequest
     {
-        public string CustomerName { get; set; } = "";
+        public string? CustomerName { get; set; }
 
-        public string CustomerPhone { get; set; } = "";
+        public string? CustomerPhone { get; set; }
 
         public string? Address { get; set; }
 

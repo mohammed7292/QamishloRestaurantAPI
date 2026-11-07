@@ -59,7 +59,7 @@ public sealed class StaffPayrollController : ControllerBase
         var month=string.IsNullOrWhiteSpace(x.PayrollMonth)?ExpensesController.BaghdadNow().ToString("yyyy-MM"):x.PayrollMonth;
         if(!DateTime.TryParseExact(month+"-01","yyyy-MM-dd",null,System.Globalization.DateTimeStyles.None,out _))return BadRequest(new{success=false,message="PayrollMonth must be yyyy-MM."});
         await using var c=DatabaseManager.GetConnection();await c.OpenAsync();
-        const string sql="INSERT INTO EmployeePayrollTransactions(EmployeeID,UserID,TransactionType,Amount,PayrollMonth,Notes) VALUES(@employee,@user,@type,@amount,@month,@notes); SELECT LAST_INSERT_ID();";
+        const string sql="INSERT INTO employeepayrolltransactions(EmployeeID,UserID,TransactionType,Amount,PayrollMonth,Notes) VALUES(@employee,@user,@type,@amount,@month,@notes); SELECT LAST_INSERT_ID();";
         await using var cmd=new MySqlCommand(sql,c);cmd.Parameters.AddWithValue("@employee",id);cmd.Parameters.AddWithValue("@user",managerUserId.Value);cmd.Parameters.AddWithValue("@type",x.TransactionType);cmd.Parameters.AddWithValue("@amount",x.Amount);cmd.Parameters.AddWithValue("@month",month);cmd.Parameters.AddWithValue("@notes",(object?)x.Notes??DBNull.Value);
         return Ok(new{success=true,transactionID=Convert.ToInt64(await cmd.ExecuteScalarAsync())});
     }
@@ -70,7 +70,7 @@ public sealed class StaffPayrollController : ControllerBase
         if (!await ManagerCredentialValidator.IsManagerAsync(Request)) return Unauthorized(new{success=false});
         month=string.IsNullOrWhiteSpace(month)?ExpensesController.BaghdadNow().ToString("yyyy-MM"):month;
         await using var c=DatabaseManager.GetConnection();await c.OpenAsync();
-        const string sql="SELECT e.EmployeeID,e.FullName,e.Salary,COALESCE(SUM(CASE WHEN t.TransactionType='Bonus' THEN t.Amount ELSE 0 END),0) Bonus,COALESCE(SUM(CASE WHEN t.TransactionType IN ('Advance','Deduction') THEN t.Amount ELSE 0 END),0) Deductions,COALESCE(SUM(CASE WHEN t.TransactionType='Payment' THEN t.Amount ELSE 0 END),0) Paid FROM restaurantemployees e LEFT JOIN EmployeePayrollTransactions t ON t.EmployeeID=e.EmployeeID AND t.PayrollMonth=@month WHERE e.EmployeeID=@id GROUP BY e.EmployeeID,e.FullName,e.Salary";
+        const string sql="SELECT e.EmployeeID,e.FullName,e.Salary,COALESCE(SUM(CASE WHEN t.TransactionType='Bonus' THEN t.Amount ELSE 0 END),0) Bonus,COALESCE(SUM(CASE WHEN t.TransactionType IN ('Advance','Deduction') THEN t.Amount ELSE 0 END),0) Deductions,COALESCE(SUM(CASE WHEN t.TransactionType='Payment' THEN t.Amount ELSE 0 END),0) Paid FROM restaurantemployees e LEFT JOIN employeepayrolltransactions t ON t.EmployeeID=e.EmployeeID AND t.PayrollMonth=@month WHERE e.EmployeeID=@id GROUP BY e.EmployeeID,e.FullName,e.Salary";
         await using var cmd=new MySqlCommand(sql,c);cmd.Parameters.AddWithValue("@month",month);cmd.Parameters.AddWithValue("@id",id);await using var r=await cmd.ExecuteReaderAsync();
         if(!await r.ReadAsync())return NotFound(new{success=false});
         decimal salary=r.GetDecimal("Salary"),bonus=r.GetDecimal("Bonus"),deductions=r.GetDecimal("Deductions"),paid=r.GetDecimal("Paid");
@@ -84,7 +84,7 @@ public sealed class StaffPayrollController : ControllerBase
         if (managerUserId is null) return Unauthorized(new{success=false});
         if(id<=0||x.Score<0||x.Score>10)return BadRequest(new{success=false});
         await using var c=DatabaseManager.GetConnection();await c.OpenAsync();
-        await using var cmd=new MySqlCommand("INSERT INTO EmployeeEvaluations(EmployeeID,UserID,EvaluationDate,Score,Notes) VALUES(@id,@user,@date,@score,@notes)",c);cmd.Parameters.AddWithValue("@id",id);cmd.Parameters.AddWithValue("@user",managerUserId.Value);cmd.Parameters.AddWithValue("@date",x.EvaluationDate??ExpensesController.BaghdadNow().Date);cmd.Parameters.AddWithValue("@score",x.Score);cmd.Parameters.AddWithValue("@notes",(object?)x.Notes??DBNull.Value);
+        await using var cmd=new MySqlCommand("INSERT INTO employeeevaluations(EmployeeID,UserID,EvaluationDate,Score,Notes) VALUES(@id,@user,@date,@score,@notes)",c);cmd.Parameters.AddWithValue("@id",id);cmd.Parameters.AddWithValue("@user",managerUserId.Value);cmd.Parameters.AddWithValue("@date",x.EvaluationDate??ExpensesController.BaghdadNow().Date);cmd.Parameters.AddWithValue("@score",x.Score);cmd.Parameters.AddWithValue("@notes",(object?)x.Notes??DBNull.Value);
         await cmd.ExecuteNonQueryAsync();return Ok(new{success=true});
     }
 }

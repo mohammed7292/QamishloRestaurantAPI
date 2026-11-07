@@ -1,4 +1,4 @@
-﻿
+
 using Microsoft.AspNetCore.Mvc;
 using MySqlConnector;
 using QamishloRestaurantAPI.Database;
@@ -50,7 +50,7 @@ namespace QamishloRestaurantAPI.Controllers
                 return StatusCode(500, new
                 {
                     message = "Database error",
-                    error = ex.Message
+                    error = "تعذر إكمال العملية بسبب خطأ داخلي."
                 });
             }
         }
@@ -103,7 +103,7 @@ namespace QamishloRestaurantAPI.Controllers
                 return StatusCode(500, new
                 {
                     message = "Could not add category.",
-                    error = ex.Message
+                    error = "تعذر إكمال العملية بسبب خطأ داخلي."
                 });
             }
         }
@@ -159,7 +159,7 @@ namespace QamishloRestaurantAPI.Controllers
                 return StatusCode(500, new
                 {
                     message = "Could not update category.",
-                    error = ex.Message
+                    error = "تعذر إكمال العملية بسبب خطأ داخلي."
                 });
             }
         }
@@ -201,7 +201,7 @@ namespace QamishloRestaurantAPI.Controllers
                 return StatusCode(500, new
                 {
                     message = "Could not deactivate category.",
-                    error = ex.Message
+                    error = "تعذر إكمال العملية بسبب خطأ داخلي."
                 });
             }
         }

@@ -26,7 +26,7 @@ public sealed class ExpensesController : ControllerBase
             DateTime businessDate = DateTime.TryParse(date, out var parsed) ? parsed.Date : BusinessDate(BaghdadNow());
             where = "BusinessDate=@date"; cmd.Parameters.AddWithValue("@date", businessDate);
         }
-        cmd.CommandText = $"SELECT ExpenseID,UserID,ExpenseType,ExpenseName,Quantity,UnitPrice,Amount,ExpenseDate,PaymentMethod,ReferenceNumber,Notes,BusinessDate FROM Expenses WHERE {where} ORDER BY ExpenseDate DESC";
+        cmd.CommandText = $"SELECT ExpenseID,UserID,ExpenseType,ExpenseName,Quantity,UnitPrice,Amount,ExpenseDate,PaymentMethod,ReferenceNumber,Notes,BusinessDate FROM expenses WHERE {where} ORDER BY ExpenseDate DESC";
         var items = new List<object>(); decimal total = 0;
         await using (var r = await cmd.ExecuteReaderAsync())
         {
@@ -46,7 +46,7 @@ public sealed class ExpensesController : ControllerBase
         if (managerUserId is null) return Unauthorized(new { success = false });
         if (string.IsNullOrWhiteSpace(request.ExpenseName) || request.Quantity <= 0 || request.UnitPrice < 0 || request.Amount <= 0) return BadRequest(new { success = false, message = "بيانات المصروف غير صحيحة." });
         await using var connection = DatabaseManager.GetConnection(); await connection.OpenAsync();
-        const string sql = "INSERT INTO Expenses(UserID,ExpenseType,ExpenseName,Quantity,UnitPrice,Amount,ExpenseDate,BusinessDate,PaymentMethod,ReferenceNumber,Notes) VALUES(@user,@type,@name,@qty,@price,@amount,@date,@business,@method,@reference,@notes); SELECT LAST_INSERT_ID();";
+        const string sql = "INSERT INTO expenses(UserID,ExpenseType,ExpenseName,Quantity,UnitPrice,Amount,ExpenseDate,BusinessDate,PaymentMethod,ReferenceNumber,Notes) VALUES(@user,@type,@name,@qty,@price,@amount,@date,@business,@method,@reference,@notes); SELECT LAST_INSERT_ID();";
         await using var cmd = new MySqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@user", managerUserId.Value); cmd.Parameters.AddWithValue("@type", request.ExpenseType); cmd.Parameters.AddWithValue("@name", request.ExpenseName.Trim()); cmd.Parameters.AddWithValue("@qty", request.Quantity); cmd.Parameters.AddWithValue("@price", request.UnitPrice); cmd.Parameters.AddWithValue("@amount", request.Amount); var dt = request.ExpenseDate is DateTime suppliedDate ? ToBaghdadTime(suppliedDate) : BaghdadNow(); cmd.Parameters.AddWithValue("@date", dt); cmd.Parameters.AddWithValue("@business", BusinessDate(dt)); cmd.Parameters.AddWithValue("@method", request.PaymentMethod); cmd.Parameters.AddWithValue("@reference", (object?)request.ReferenceNumber ?? DBNull.Value); cmd.Parameters.AddWithValue("@notes", (object?)request.Notes ?? DBNull.Value);
         var id = Convert.ToInt32(await cmd.ExecuteScalarAsync()); return Ok(new { success = true, expenseID = id });
@@ -58,7 +58,7 @@ public sealed class ExpensesController : ControllerBase
         if (!await ManagerCredentialValidator.IsManagerAsync(Request)) return Unauthorized(new { success = false });
         if (id <= 0 || string.IsNullOrWhiteSpace(request.ExpenseName) || request.Quantity <= 0 || request.UnitPrice < 0 || request.Amount <= 0) return BadRequest(new { success = false });
         await using var connection = DatabaseManager.GetConnection(); await connection.OpenAsync();
-        const string sql = "UPDATE Expenses SET ExpenseType=@type,ExpenseName=@name,Quantity=@qty,UnitPrice=@price,Amount=@amount,ExpenseDate=@date,BusinessDate=@business,PaymentMethod=@method,ReferenceNumber=@reference,Notes=@notes WHERE ExpenseID=@id";
+        const string sql = "UPDATE expenses SET ExpenseType=@type,ExpenseName=@name,Quantity=@qty,UnitPrice=@price,Amount=@amount,ExpenseDate=@date,BusinessDate=@business,PaymentMethod=@method,ReferenceNumber=@reference,Notes=@notes WHERE ExpenseID=@id";
         await using var cmd = new MySqlCommand(sql, connection); cmd.Parameters.AddWithValue("@id", id); cmd.Parameters.AddWithValue("@type", request.ExpenseType); cmd.Parameters.AddWithValue("@name", request.ExpenseName.Trim()); cmd.Parameters.AddWithValue("@qty", request.Quantity); cmd.Parameters.AddWithValue("@price", request.UnitPrice); cmd.Parameters.AddWithValue("@amount", request.Amount); var dt=request.ExpenseDate is DateTime suppliedDate ? ToBaghdadTime(suppliedDate) : BaghdadNow(); cmd.Parameters.AddWithValue("@date",dt); cmd.Parameters.AddWithValue("@business",BusinessDate(dt)); cmd.Parameters.AddWithValue("@method",request.PaymentMethod); cmd.Parameters.AddWithValue("@reference",(object?)request.ReferenceNumber??DBNull.Value); cmd.Parameters.AddWithValue("@notes",(object?)request.Notes??DBNull.Value);
         return await cmd.ExecuteNonQueryAsync() == 0 ? NotFound(new { success = false }) : Ok(new { success = true });
     }
@@ -67,7 +67,7 @@ public sealed class ExpensesController : ControllerBase
     public async Task<IActionResult> Delete(int id)
     {
         if (!await ManagerCredentialValidator.IsManagerAsync(Request)) return Unauthorized(new { success = false });
-        await using var connection=DatabaseManager.GetConnection(); await connection.OpenAsync(); await using var cmd=new MySqlCommand("DELETE FROM Expenses WHERE ExpenseID=@id",connection); cmd.Parameters.AddWithValue("@id",id);
+        await using var connection=DatabaseManager.GetConnection(); await connection.OpenAsync(); await using var cmd=new MySqlCommand("DELETE FROM expenses WHERE ExpenseID=@id",connection); cmd.Parameters.AddWithValue("@id",id);
         return await cmd.ExecuteNonQueryAsync()==0?NotFound(new{success=false}):Ok(new{success=true});
     }
 

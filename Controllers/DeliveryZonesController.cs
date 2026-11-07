@@ -44,7 +44,7 @@ public sealed class deliveryzonesController : ControllerBase
     public async Task<IActionResult> Create([FromBody] DeliveryZoneRequest request)
     {
         if (!await ManagerCredentialValidator.IsManagerAsync(Request)) return Unauthorized(new { success = false, message = "Manager login required." });
-        if (string.IsNullOrWhiteSpace(request.ZoneName) || request.DeliveryFee < 0 || string.IsNullOrWhiteSpace(request.ZoneCoordinates))
+        if (string.IsNullOrWhiteSpace(request.ZoneName) || request.DeliveryFee < 0 || !IsValidPolygonJson(request.ZoneCoordinates))
             return BadRequest(new { success = false, message = "اسم المنطقة والسعر والإحداثيات مطلوبة." });
         await using var connection = DatabaseManager.GetConnection();
         await connection.OpenAsync();
@@ -64,15 +64,17 @@ public sealed class deliveryzonesController : ControllerBase
     public async Task<IActionResult> Update(int id, [FromBody] DeliveryZoneRequest request)
     {
         if (!await ManagerCredentialValidator.IsManagerAsync(Request)) return Unauthorized(new { success = false, message = "Manager login required." });
-        if (id <= 0 || string.IsNullOrWhiteSpace(request.ZoneName) || request.DeliveryFee < 0 || string.IsNullOrWhiteSpace(request.ZoneCoordinates))
-            return BadRequest(new { success = false, message = "بيانات المنطقة غير صحيحة." });
+        if (id <= 0 || string.IsNullOrWhiteSpace(request.ZoneName) || request.DeliveryFee < 0)
+            return BadRequest(new { success = false, message = "اسم المنطقة والسعر غير صحيحين." });
+        if (!string.IsNullOrWhiteSpace(request.ZoneCoordinates) && !IsValidPolygonJson(request.ZoneCoordinates))
+            return BadRequest(new { success = false, message = "إحداثيات المنطقة غير صالحة. يجب أن تحتوي على ثلاث نقاط صحيحة على الأقل." });
         await using var connection = DatabaseManager.GetConnection();
         await connection.OpenAsync();
-        const string sql = "UPDATE deliveryzones SET ZoneName=@name,DeliveryFee=@fee,EstimatedMinutes=@minutes,Description=@description,IsActive=@active,ZoneCoordinates=@coordinates WHERE DeliveryZoneID=@id";
+        const string sql = "UPDATE deliveryzones SET ZoneName=@name,DeliveryFee=@fee,EstimatedMinutes=@minutes,Description=@description,IsActive=@active,ZoneCoordinates=CASE WHEN @coordinates IS NULL OR @coordinates='' THEN ZoneCoordinates ELSE @coordinates END WHERE DeliveryZoneID=@id";
         await using var cmd = new MySqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@id", id); cmd.Parameters.AddWithValue("@name", request.ZoneName.Trim());
         cmd.Parameters.AddWithValue("@fee", request.DeliveryFee); cmd.Parameters.AddWithValue("@minutes", request.EstimatedMinutes is null ? DBNull.Value : request.EstimatedMinutes);
-        cmd.Parameters.AddWithValue("@description", (object?)request.Description ?? DBNull.Value); cmd.Parameters.AddWithValue("@active", request.IsActive); cmd.Parameters.AddWithValue("@coordinates", request.ZoneCoordinates);
+        cmd.Parameters.AddWithValue("@description", (object?)request.Description ?? DBNull.Value); cmd.Parameters.AddWithValue("@active", request.IsActive); cmd.Parameters.AddWithValue("@coordinates", (object?)request.ZoneCoordinates ?? DBNull.Value);
         return await cmd.ExecuteNonQueryAsync() == 0 ? NotFound(new { success = false }) : Ok(new { success = true });
     }
 
@@ -84,6 +86,28 @@ public sealed class deliveryzonesController : ControllerBase
         await using var cmd = new MySqlCommand("UPDATE deliveryzones SET IsActive=0 WHERE DeliveryZoneID=@id", connection);
         cmd.Parameters.AddWithValue("@id", id);
         return await cmd.ExecuteNonQueryAsync() == 0 ? NotFound(new { success = false }) : Ok(new { success = true });
+    }
+
+    private static bool IsValidPolygonJson(string json)
+    {
+        try
+        {
+            using var document = System.Text.Json.JsonDocument.Parse(json);
+            if (document.RootElement.ValueKind != System.Text.Json.JsonValueKind.Array || document.RootElement.GetArrayLength() < 3)
+                return false;
+            foreach (var point in document.RootElement.EnumerateArray())
+            {
+                if (point.ValueKind != System.Text.Json.JsonValueKind.Object ||
+                    !point.TryGetProperty("lat", out var lat) ||
+                    !point.TryGetProperty("lng", out var lng) ||
+                    !lat.TryGetDouble(out double latitude) ||
+                    !lng.TryGetDouble(out double longitude) ||
+                    latitude is < -90 or > 90 || longitude is < -180 or > 180)
+                    return false;
+            }
+            return true;
+        }
+        catch (System.Text.Json.JsonException) { return false; }
     }
 
     [HttpPut("minimum-order")]

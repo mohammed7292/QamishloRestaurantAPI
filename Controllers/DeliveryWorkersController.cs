@@ -125,7 +125,7 @@ namespace QamishloRestaurantAPI.Controllers
                     {
                         success = false,
                         message = "Database error.",
-                        error = ex.Message
+                        error = "تعذر إكمال العملية بسبب خطأ داخلي."
                     }
                 );
             }
@@ -343,7 +343,7 @@ namespace QamishloRestaurantAPI.Controllers
                         success = false,
                         message =
                             "Could not load worker orders.",
-                        error = ex.Message
+                        error = "تعذر إكمال العملية بسبب خطأ داخلي."
                     }
                 );
             }
@@ -528,7 +528,7 @@ namespace QamishloRestaurantAPI.Controllers
                 if (affected > 0)
                 {
                     await using var notificationLookup = new MySqlCommand(
-                        "SELECT CustomerID FROM Orders WHERE OrderID=@orderID LIMIT 1", connection);
+                        "SELECT CustomerID FROM orders WHERE OrderID=@orderID LIMIT 1", connection);
                     notificationLookup.Parameters.AddWithValue("@orderID", orderId);
                     var customerValue = await notificationLookup.ExecuteScalarAsync();
                     if (customerValue != null && customerValue != DBNull.Value)
@@ -569,7 +569,7 @@ namespace QamishloRestaurantAPI.Controllers
                         success = false,
                         message =
                             "Could not update order status.",
-                        error = ex.Message
+                        error = "تعذر إكمال العملية بسبب خطأ داخلي."
                     }
                 );
             }
@@ -681,7 +681,7 @@ namespace QamishloRestaurantAPI.Controllers
                         success = false,
                         message =
                             "Could not load today's statistics.",
-                        error = ex.Message
+                        error = "تعذر إكمال العملية بسبب خطأ داخلي."
                     }
                 );
             }

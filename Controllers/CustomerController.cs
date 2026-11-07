@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc;
 using MySqlConnector;
 using QamishloRestaurantAPI.Database;
 using System.Security.Cryptography;
