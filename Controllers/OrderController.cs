@@ -309,7 +309,7 @@ namespace QamishloRestaurantAPI.Controllers
                             SELECT Price
                             FROM products
                             WHERE ProductID = @ProductID
-                              AND IsAvailable = 1
+                              AND (IsAvailable = 1 OR (AvailableUntil IS NOT NULL AND AvailableUntil <= DATE_ADD(UTC_TIMESTAMP(), INTERVAL 3 HOUR)))
                             LIMIT 1;";
 
                         using (
@@ -839,7 +839,7 @@ namespace QamishloRestaurantAPI.Controllers
                         ON o.DeliveryWorkerID =
                            dw.DeliveryWorkerID
 
-                    WHERE 1 = 1
+                    WHERE o.IsArchived = 0
                 ";
 
                 List<MySqlParameter> parameters =
@@ -1141,7 +1141,7 @@ namespace QamishloRestaurantAPI.Controllers
                         ON o.DeliveryWorkerID =
                            dw.DeliveryWorkerID
 
-                    WHERE o.OrderType = 'Delivery'
+                    WHERE o.OrderType = 'Delivery' AND o.IsArchived = 0
                 ";
 
                 if (!string.IsNullOrWhiteSpace(status))
@@ -1772,7 +1772,8 @@ namespace QamishloRestaurantAPI.Controllers
                         OrderID,
                         OrderType,
                         Status,
-                        DeliveryWorkerID
+                        DeliveryWorkerID,
+                        IsArchived
                     FROM orders
                     WHERE OrderID = @OrderID
                     LIMIT 1;";
@@ -1795,13 +1796,12 @@ namespace QamishloRestaurantAPI.Controllers
                     using MySqlDataReader reader =
                         await checkCommand.ExecuteReaderAsync();
 
-                    if (!await reader.ReadAsync())
+                    if (!await reader.ReadAsync() || Convert.ToBoolean(reader["IsArchived"]))
                     {
                         return NotFound(new
                         {
                             success = false,
-                            message =
-                                $"Order #{id} was not found."
+                            message = $"Order #{id} was not found or has been archived."
                         });
                     }
 

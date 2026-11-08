@@ -130,6 +130,7 @@ public sealed class DeliveryWorkerTransferController : ControllerBase
                 WHERE OrderID = @order
                   AND DeliveryWorkerID = @from
                   AND OrderType = 'Delivery'
+                  AND IsArchived = 0
                   AND Status NOT IN ('Delivered', 'Cancelled')
                 FOR UPDATE;
                 """;

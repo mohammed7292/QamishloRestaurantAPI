@@ -54,7 +54,7 @@ public sealed class OrdersAdminController : ControllerBase
             foreach (var item in request.Items)
             {
                 await using var product = new MySqlCommand(
-                    "SELECT ProductName, Price FROM products WHERE ProductID=@id AND IsAvailable=1", connection, transaction);
+                    "SELECT ProductName, Price FROM products WHERE ProductID=@id AND (IsAvailable=1 OR (AvailableUntil IS NOT NULL AND AvailableUntil <= DATE_ADD(UTC_TIMESTAMP(), INTERVAL 3 HOUR)))", connection, transaction);
                 product.Parameters.AddWithValue("@id", item.ProductID);
                 await using var reader = await product.ExecuteReaderAsync();
                 if (!await reader.ReadAsync())
@@ -125,9 +125,9 @@ public sealed class OrdersAdminController : ControllerBase
             decimal subtotal=0;
             foreach(var item in request.Items)
             {
-                await using var p=new MySqlCommand("SELECT Price FROM products WHERE ProductID=@id AND IsAvailable=1",c,tx);p.Parameters.AddWithValue("@id",item.ProductID);var value=await p.ExecuteScalarAsync();if(value is null||value==DBNull.Value){await tx.RollbackAsync();return BadRequest(new{success=false,message=$"Product {item.ProductID} unavailable."});}subtotal+=Convert.ToDecimal(value)*item.Quantity;
+                await using var p=new MySqlCommand("SELECT Price FROM products WHERE ProductID=@id AND (IsAvailable=1 OR (AvailableUntil IS NOT NULL AND AvailableUntil <= DATE_ADD(UTC_TIMESTAMP(), INTERVAL 3 HOUR)))",c,tx);p.Parameters.AddWithValue("@id",item.ProductID);var value=await p.ExecuteScalarAsync();if(value is null||value==DBNull.Value){await tx.RollbackAsync();return BadRequest(new{success=false,message=$"Product {item.ProductID} unavailable."});}subtotal+=Convert.ToDecimal(value)*item.Quantity;
             }
-            await using(var exists=new MySqlCommand("SELECT COUNT(*) FROM orders WHERE OrderID=@id AND Status NOT IN ('Delivered','Cancelled')",c,tx)){exists.Parameters.AddWithValue("@id",id);if(Convert.ToInt32(await exists.ExecuteScalarAsync())==0){await tx.RollbackAsync();return NotFound(new{success=false,message="Order not found or already closed."});}}
+            await using(var exists=new MySqlCommand("SELECT COUNT(*) FROM orders WHERE OrderID=@id AND IsArchived=0 AND Status NOT IN ('Delivered','Cancelled')",c,tx)){exists.Parameters.AddWithValue("@id",id);if(Convert.ToInt32(await exists.ExecuteScalarAsync())==0){await tx.RollbackAsync();return NotFound(new{success=false,message="Order not found or already closed."});}}
             await using(var del=new MySqlCommand("DELETE FROM orderdetails WHERE OrderID=@id",c,tx)){del.Parameters.AddWithValue("@id",id);await del.ExecuteNonQueryAsync();}
             foreach(var item in request.Items)
             {
@@ -141,14 +141,30 @@ public sealed class OrdersAdminController : ControllerBase
         catch{await tx.RollbackAsync();throw;}
     }
 
-    // Soft delete: preserve order history and accounting; cancellation removes it from sales reports.
+    // Archive an order from the restaurant management list without changing its
+    // business status or removing it from financial reports/customer history.
     [HttpDelete("{id:int}")]
     public async Task<IActionResult> Cancel(int id)
     {
-        if (!await ManagerCredentialValidator.IsManagerAsync(Request)) return Unauthorized(new { success = false, message = "Manager login required." });
-        await using var c=DatabaseManager.GetConnection();await c.OpenAsync();
-        const string sql="UPDATE orders SET Status='Cancelled',UpdatedAt=NOW() WHERE OrderID=@id AND Status NOT IN ('Delivered','Cancelled')";
-        await using var cmd=new MySqlCommand(sql,c);cmd.Parameters.AddWithValue("@id",id);if(await cmd.ExecuteNonQueryAsync()==0)return Conflict(new{success=false,message="Order does not exist or is already closed."});return Ok(new{success=true,message="Order cancelled; audit history retained."});
+        if (id <= 0) return BadRequest(new { success = false, message = "Invalid order ID." });
+        if (!await ManagerCredentialValidator.IsManagerAsync(Request))
+            return Unauthorized(new { success = false, message = "Manager login required." });
+
+        await using var connection = DatabaseManager.GetConnection();
+        await connection.OpenAsync();
+        const string sql = "UPDATE orders SET IsArchived=1, UpdatedAt=NOW() WHERE OrderID=@id AND IsArchived=0";
+        await using var command = new MySqlCommand(sql, connection);
+        command.Parameters.AddWithValue("@id", id);
+        if (await command.ExecuteNonQueryAsync() == 0)
+        {
+            await using var exists = new MySqlCommand("SELECT COUNT(*) FROM orders WHERE OrderID=@id", connection);
+            exists.Parameters.AddWithValue("@id", id);
+            if (Convert.ToInt32(await exists.ExecuteScalarAsync()) == 0)
+                return NotFound(new { success = false, message = "Order not found." });
+            return Conflict(new { success = false, message = "Order is already archived." });
+        }
+
+        return Ok(new { success = true, orderID = id, isArchived = true, message = "Order archived. Sales history was preserved." });
     }
 }
 public sealed class EditOrderRequest { public List<EditOrderItem> Items{get;set;}=new();public decimal DeliveryFee{get;set;}public decimal DiscountAmount{get;set;}public string? Notes{get;set;} }
