@@ -54,7 +54,7 @@ public sealed class OrdersAdminController : ControllerBase
             foreach (var item in request.Items)
             {
                 await using var product = new MySqlCommand(
-                    "SELECT ProductName, Price FROM products WHERE ProductID=@id AND (IsAvailable=1 OR (AvailableUntil IS NOT NULL AND AvailableUntil <= DATE_ADD(UTC_TIMESTAMP(), INTERVAL 3 HOUR)))", connection, transaction);
+                    "SELECT ProductName, Price FROM products WHERE ProductID=@id AND (IsAvailable=1 OR (AvailableUntil IS NOT NULL AND AvailableUntil <= UTC_TIMESTAMP()))", connection, transaction);
                 product.Parameters.AddWithValue("@id", item.ProductID);
                 await using var reader = await product.ExecuteReaderAsync();
                 if (!await reader.ReadAsync())
@@ -125,7 +125,7 @@ public sealed class OrdersAdminController : ControllerBase
             decimal subtotal=0;
             foreach(var item in request.Items)
             {
-                await using var p=new MySqlCommand("SELECT Price FROM products WHERE ProductID=@id AND (IsAvailable=1 OR (AvailableUntil IS NOT NULL AND AvailableUntil <= DATE_ADD(UTC_TIMESTAMP(), INTERVAL 3 HOUR)))",c,tx);p.Parameters.AddWithValue("@id",item.ProductID);var value=await p.ExecuteScalarAsync();if(value is null||value==DBNull.Value){await tx.RollbackAsync();return BadRequest(new{success=false,message=$"Product {item.ProductID} unavailable."});}subtotal+=Convert.ToDecimal(value)*item.Quantity;
+                await using var p=new MySqlCommand("SELECT Price FROM products WHERE ProductID=@id AND (IsAvailable=1 OR (AvailableUntil IS NOT NULL AND AvailableUntil <= UTC_TIMESTAMP()))",c,tx);p.Parameters.AddWithValue("@id",item.ProductID);var value=await p.ExecuteScalarAsync();if(value is null||value==DBNull.Value){await tx.RollbackAsync();return BadRequest(new{success=false,message=$"Product {item.ProductID} unavailable."});}subtotal+=Convert.ToDecimal(value)*item.Quantity;
             }
             await using(var exists=new MySqlCommand("SELECT COUNT(*) FROM orders WHERE OrderID=@id AND IsArchived=0 AND Status NOT IN ('Delivered','Cancelled')",c,tx)){exists.Parameters.AddWithValue("@id",id);if(Convert.ToInt32(await exists.ExecuteScalarAsync())==0){await tx.RollbackAsync();return NotFound(new{success=false,message="Order not found or already closed."});}}
             await using(var del=new MySqlCommand("DELETE FROM orderdetails WHERE OrderID=@id",c,tx)){del.Parameters.AddWithValue("@id",id);await del.ExecuteNonQueryAsync();}

@@ -361,3 +361,23 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+
+**/bin/
+**/obj/
+.vs/
+**/.vs/
+*.user
+*.suo
+*.cache
+*.log
+.env
+.env.*
+!.env.example
+appsettings.Production.json
+secrets.json
+*.pfx
+*.p12
+*.keystore
+
+# Local launch profiles may contain developer-only environment settings.
+Properties/launchSettings.json

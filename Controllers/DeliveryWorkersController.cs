@@ -38,124 +38,95 @@ namespace QamishloRestaurantAPI.Controllers
         // =====================================================
 
         [HttpPost("login")]
-        public async Task<IActionResult> Login(
-            [FromBody] DeliveryLoginRequest request)
+        public async Task<IActionResult> Login([FromBody] DeliveryLoginRequest request)
         {
             try
             {
-                if (
-                    string.IsNullOrWhiteSpace(request.Username) ||
-                    string.IsNullOrWhiteSpace(request.Password)
-                )
-                {
-                    return BadRequest(new
-                    {
-                        success = false,
-                        message =
-                            "Username and password are required."
-                    });
-                }
+                if (request == null || string.IsNullOrWhiteSpace(request.Username) || string.IsNullOrWhiteSpace(request.Password))
+                    return BadRequest(new { success = false, message = "اسم المستخدم وكلمة المرور مطلوبان." });
 
-                using MySqlConnection connection =
-                    DatabaseManager.GetConnection();
-
+                await using var connection = DatabaseManager.GetConnection();
                 await connection.OpenAsync();
 
-                string query = """
-                    SELECT
-                        DeliveryWorkerID,
-                        FullName,
-                        Username,
-                        Phone,
-                        IsActive
+                const string query = """
+                    SELECT DeliveryWorkerID, FullName, Username, Phone, IsActive
                     FROM deliveryworkers
-                    WHERE Username = @Username
-                      AND Password = @Password
+                    WHERE Username=@Username AND Password=@Password
                     LIMIT 1;
                     """;
 
-                using MySqlCommand command =
-                    new MySqlCommand(
-                        query,
-                        connection
-                    );
+                int workerId;
+                string fullName;
+                string username;
+                string? phone;
+                bool isActive;
 
-                command.Parameters.AddWithValue(
-                    "@Username",
-                    request.Username.Trim()
-                );
-
-                command.Parameters.AddWithValue(
-                    "@Password",
-                    request.Password
-                );
-
-                using MySqlDataReader reader =
-                    await command.ExecuteReaderAsync();
-
-                if (!await reader.ReadAsync())
+                await using (var command = new MySqlCommand(query, connection))
                 {
-                    return Unauthorized(new
-                    {
-                        success = false,
-                        message =
-                            "Invalid username or password."
-                    });
+                    command.Parameters.AddWithValue("@Username", request.Username.Trim());
+                    command.Parameters.AddWithValue("@Password", request.Password);
+                    await using var reader = await command.ExecuteReaderAsync();
+                    if (!await reader.ReadAsync())
+                        return Unauthorized(new { success = false, message = "اسم المستخدم أو كلمة المرور غير صحيحة." });
+
+                    workerId = reader.GetInt32("DeliveryWorkerID");
+                    fullName = reader.GetString("FullName");
+                    username = reader.GetString("Username");
+                    phone = reader.IsDBNull(reader.GetOrdinal("Phone")) ? null : reader.GetString("Phone");
+                    isActive = reader.GetBoolean("IsActive");
                 }
 
-                bool isActive =
-                    Convert.ToBoolean(
-                        reader["IsActive"]
-                    );
-
                 if (!isActive)
+                    return Unauthorized(new { success = false, message = "هذا الحساب غير نشط." });
+
+                // A successful login starts a shift and opens one shift-history row.
+                const string updateWorkerSql = """
+                    UPDATE deliveryworkers
+                    SET IsOnShift=1, ShiftStartedAt=UTC_TIMESTAMP(), ShiftEndedAt=NULL,
+                        UpdatedAt=UTC_TIMESTAMP()
+                    WHERE DeliveryWorkerID=@id AND IsActive=1;
+                    """;
+                await using (var updateWorker = new MySqlCommand(updateWorkerSql, connection))
                 {
-                    return Unauthorized(new
-                    {
-                        success = false,
-                        message =
-                            "This delivery worker account is inactive."
-                    });
+                    updateWorker.Parameters.AddWithValue("@id", workerId);
+                    await updateWorker.ExecuteNonQueryAsync();
+                }
+
+                const string insertShiftSql = """
+                    INSERT INTO deliveryworkershifts(DeliveryWorkerID, StartedAt)
+                    SELECT @id, UTC_TIMESTAMP()
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM deliveryworkershifts
+                        WHERE DeliveryWorkerID=@id AND EndedAt IS NULL
+                    );
+                    """;
+                await using (var insertShift = new MySqlCommand(insertShiftSql, connection))
+                {
+                    insertShift.Parameters.AddWithValue("@id", workerId);
+                    await insertShift.ExecuteNonQueryAsync();
                 }
 
                 return Ok(new
                 {
                     success = true,
-
-                    deliveryWorkerID =
-                        Convert.ToInt32(
-                            reader["DeliveryWorkerID"]
-                        ),
-
-                    fullName =
-                        reader["FullName"]?.ToString(),
-
-                    username =
-                        reader["Username"]?.ToString(),
-
-                    phone =
-                        reader["Phone"] == DBNull.Value
-                            ? null
-                            : reader["Phone"]?.ToString(),
-
-                    message =
-                        "Login successful."
+                    deliveryWorkerID = workerId,
+                    fullName,
+                    username,
+                    phone,
+                    isOnShift = true,
+                    message = "Login successful."
                 });
             }
             catch (Exception ex)
             {
-                return StatusCode(
-                    500,
-                    new
-                    {
-                        success = false,
-                        message = "Database error.",
-                        error = "تعذر إكمال العملية بسبب خطأ داخلي."
-                    }
-                );
+                return StatusCode(500, new
+                {
+                    success = false,
+                    message = "تعذر تسجيل الدخول حالياً. تحقق من اتصال الخادم وحاول مجدداً.",
+                    error = "Database operation failed."
+                });
             }
         }
-
 
         // =====================================================
         // GET WORKER orders
@@ -229,7 +200,7 @@ namespace QamishloRestaurantAPI.Controllers
 
                     WHERE o.DeliveryWorkerID =
                           @workerId
-
+                      AND o.IsArchived = 0
                       AND o.Status NOT IN
                           ('Delivered', 'Cancelled')
 
@@ -446,6 +417,7 @@ namespace QamishloRestaurantAPI.Controllers
                     FROM orders
                     WHERE OrderID = @orderID
                       AND DeliveryWorkerID = @workerID
+                      AND IsArchived = 0
                     LIMIT 1;
                     """;
 
@@ -487,25 +459,8 @@ namespace QamishloRestaurantAPI.Controllers
                 // =================================================
 
                 bool validFlow =
-                    (
-                        currentStatus == "New" &&
-                        status == "Preparing"
-                    )
-                    ||
-                    (
-                        currentStatus == "Preparing" &&
-                        status == "Ready"
-                    )
-                    ||
-                    (
-                        currentStatus == "Ready" &&
-                        (status == "OutForDelivery" || status == "Delivered")
-                    )
-                    ||
-                    (
-                        currentStatus == "OutForDelivery" &&
-                        status == "Delivered"
-                    );
+                    (currentStatus == "Ready" && (status == "OutForDelivery" || status == "Delivered"))
+                    || (currentStatus == "OutForDelivery" && status == "Delivered");
 
                 if (!validFlow)
                 {
@@ -526,7 +481,8 @@ namespace QamishloRestaurantAPI.Controllers
                     UPDATE orders
                     SET
                         Status = @status,
-                        UpdatedAt = NOW()
+                        PickedUpAt = CASE WHEN @status='OutForDelivery' AND PickedUpAt IS NULL THEN UTC_TIMESTAMP() ELSE PickedUpAt END,
+                        UpdatedAt = UTC_TIMESTAMP()
                     WHERE OrderID = @orderID
                       AND DeliveryWorkerID = @workerID;
                     """;
@@ -605,200 +561,146 @@ namespace QamishloRestaurantAPI.Controllers
             }
         }
 
+
         // =====================================================
-        // GET DELIVERED ORDERS HISTORY
+        // DELIVERED ORDER HISTORY
+        // GET: api/deliveryworkers/{workerId}/history
         // =====================================================
 
-        [HttpGet("{workerId}/delivered-orders")]
-        public async Task<IActionResult> GetDeliveredOrders(int workerId)
+        [HttpGet("{workerId:int}/history")]
+        public async Task<IActionResult> GetDeliveredHistory(
+            int workerId,
+            [FromQuery] string? from = null,
+            [FromQuery] string? to = null,
+            [FromQuery] int page = 1,
+            [FromQuery] int pageSize = 50)
         {
+            if (workerId <= 0)
+                return BadRequest(new { success = false, message = "Invalid delivery worker ID." });
+
+            page = Math.Max(1, page);
+            pageSize = Math.Clamp(pageSize, 1, 100);
+
+            DateTime? fromDate = DateTime.TryParse(from, out var parsedFrom) ? parsedFrom.Date : null;
+            DateTime? toDate = DateTime.TryParse(to, out var parsedTo) ? parsedTo.Date : null;
+            if (fromDate.HasValue && toDate.HasValue && fromDate > toDate)
+                return BadRequest(new { success = false, message = "The from date must be before the to date." });
+
             try
             {
-                if (workerId <= 0)
-                {
-                    return BadRequest(new
-                    {
-                        success = false,
-                        message = "Invalid delivery worker ID."
-                    });
-                }
-
-                using MySqlConnection connection =
-                    DatabaseManager.GetConnection();
-
+                await using var connection = DatabaseManager.GetConnection();
                 await connection.OpenAsync();
+                if (!await IsAuthenticatedWorkerAsync(connection, workerId, Request))
+                    return Unauthorized(new { success = false, message = "Worker login is required or expired." });
 
-                // Authenticate delivery worker
-                if (!await IsAuthenticatedWorkerAsync(
-                    connection, workerId, Request))
+                const string summarySql = """
+                    SELECT COUNT(*) AS DeliveredCount,
+                           COALESCE(SUM(TotalAmount), 0) AS TotalAmount,
+                           COALESCE(AVG(TotalAmount), 0) AS AverageAmount
+                    FROM orders
+                    WHERE DeliveryWorkerID = @workerId
+                      AND Status = 'Delivered'
+                      AND (@fromDate IS NULL OR BusinessDate >= @fromDate)
+                      AND (@toDate IS NULL OR BusinessDate <= @toDate);
+                    """;
+                int deliveredCount;
+                decimal totalAmount;
+                decimal averageAmount;
+                await using (var summary = new MySqlCommand(summarySql, connection))
                 {
-                    return Unauthorized(new
-                    {
-                        success = false,
-                        message = "Worker login is required or expired."
-                    });
+                    summary.Parameters.AddWithValue("@workerId", workerId);
+                    summary.Parameters.AddWithValue("@fromDate", (object?)fromDate ?? DBNull.Value);
+                    summary.Parameters.AddWithValue("@toDate", (object?)toDate ?? DBNull.Value);
+                    await using var r = await summary.ExecuteReaderAsync();
+                    await r.ReadAsync();
+                    deliveredCount = Convert.ToInt32(r["DeliveredCount"]);
+                    totalAmount = Convert.ToDecimal(r["TotalAmount"]);
+                    averageAmount = Convert.ToDecimal(r["AverageAmount"]);
                 }
 
-                // Get delivered orders assigned to this worker
-                string query = """
-            SELECT
-                o.OrderID,
-                o.CustomerID,
-
-                COALESCE(
-                    c.FullName,
-                    'Walk-in Customer'
-                ) AS CustomerName,
-
-                COALESCE(
-                    c.Phone,
-                    ''
-                ) AS CustomerPhone,
-
-                o.DeliveryWorkerID,
-                o.DeliveryZoneID,
-
-                COALESCE(
-                    dz.ZoneName,
-                    ''
-                ) AS ZoneName,
-
-                o.OrderDate,
-                o.OrderType,
-                o.Status,
-                o.Subtotal,
-                o.DeliveryFee,
-                o.DiscountAmount,
-                o.TotalAmount,
-                o.DeliveryAddress,
-                o.Notes
-
-            FROM orders o
-
-            LEFT JOIN customers c
-                ON o.CustomerID = c.CustomerID
-
-            LEFT JOIN deliveryzones dz
-                ON o.DeliveryZoneID = dz.DeliveryZoneID
-
-            WHERE o.DeliveryWorkerID = @workerId
-              AND o.Status = 'Delivered'
-
-            ORDER BY
-                o.OrderDate DESC,
-                o.OrderID DESC;
-            """;
-
-                using MySqlCommand command =
-                    new MySqlCommand(query, connection);
-
-                command.Parameters.AddWithValue(
-                    "@workerId",
-                    workerId
-                );
-
-                using MySqlDataReader reader =
-                    await command.ExecuteReaderAsync();
-
-                List<object> orders = new List<object>();
-
-                while (await reader.ReadAsync())
+                const string ordersSql = """
+                    SELECT o.OrderID, o.CustomerID,
+                           COALESCE(c.FullName, 'Walk-in Customer') AS CustomerName,
+                           COALESCE(c.Phone, '') AS CustomerPhone,
+                           o.DeliveryWorkerID, o.DeliveryZoneID,
+                           COALESCE(dz.ZoneName, '') AS ZoneName,
+                           o.OrderDate, o.OrderType, o.Status,
+                           o.Subtotal, o.DeliveryFee, o.DiscountAmount, o.TotalAmount,
+                           o.DeliveryAddress, o.Notes
+                    FROM orders o
+                    LEFT JOIN customers c ON c.CustomerID = o.CustomerID
+                    LEFT JOIN deliveryzones dz ON dz.DeliveryZoneID = o.DeliveryZoneID
+                    WHERE o.DeliveryWorkerID = @workerId
+                      AND o.Status = 'Delivered'
+                      AND (@fromDate IS NULL OR o.BusinessDate >= @fromDate)
+                      AND (@toDate IS NULL OR o.BusinessDate <= @toDate)
+                    ORDER BY o.OrderDate DESC, o.OrderID DESC
+                    LIMIT @limit OFFSET @offset;
+                    """;
+                var orders = new List<object>();
+                await using (var command = new MySqlCommand(ordersSql, connection))
                 {
-                    orders.Add(new
+                    command.Parameters.AddWithValue("@workerId", workerId);
+                    command.Parameters.AddWithValue("@fromDate", (object?)fromDate ?? DBNull.Value);
+                    command.Parameters.AddWithValue("@toDate", (object?)toDate ?? DBNull.Value);
+                    command.Parameters.AddWithValue("@limit", pageSize);
+                    command.Parameters.AddWithValue("@offset", (page - 1) * pageSize);
+                    await using var reader = await command.ExecuteReaderAsync();
+                    while (await reader.ReadAsync())
                     {
-                        OrderID = Convert.ToInt32(
-                            reader["OrderID"]
-                        ),
-
-                        CustomerID = reader["CustomerID"] == DBNull.Value
-                            ? (int?)null
-                            : Convert.ToInt32(reader["CustomerID"]),
-
-                        CustomerName =
-                            reader["CustomerName"]?.ToString() ?? "",
-
-                        CustomerPhone =
-                            reader["CustomerPhone"]?.ToString() ?? "",
-
-                        DeliveryWorkerID =
-                            reader["DeliveryWorkerID"] == DBNull.Value
-                                ? (int?)null
-                                : Convert.ToInt32(
-                                    reader["DeliveryWorkerID"]
-                                ),
-
-                        DeliveryZoneID =
-                            reader["DeliveryZoneID"] == DBNull.Value
-                                ? (int?)null
-                                : Convert.ToInt32(
-                                    reader["DeliveryZoneID"]
-                                ),
-
-                        ZoneName =
-                            reader["ZoneName"]?.ToString() ?? "",
-
-                        OrderDate =
-                            Convert.ToDateTime(reader["OrderDate"]),
-
-                        OrderType =
-                            reader["OrderType"]?.ToString() ?? "",
-
-                        Status =
-                            reader["Status"]?.ToString() ?? "",
-
-                        Subtotal =
-                            Convert.ToDecimal(reader["Subtotal"]),
-
-                        DeliveryFee =
-                            Convert.ToDecimal(reader["DeliveryFee"]),
-
-                        DiscountAmount =
-                            Convert.ToDecimal(reader["DiscountAmount"]),
-
-                        TotalAmount =
-                            Convert.ToDecimal(reader["TotalAmount"]),
-
-                        DeliveryAddress =
-                            reader["DeliveryAddress"] == DBNull.Value
-                                ? ""
-                                : reader["DeliveryAddress"]?.ToString() ?? "",
-
-                        Notes =
-                            reader["Notes"] == DBNull.Value
-                                ? ""
-                                : reader["Notes"]?.ToString() ?? ""
-                    });
+                        orders.Add(new
+                        {
+                            orderID = Convert.ToInt32(reader["OrderID"]),
+                            customerID = reader["CustomerID"] == DBNull.Value ? (int?)null : Convert.ToInt32(reader["CustomerID"]),
+                            customerName = reader["CustomerName"]?.ToString(),
+                            customerPhone = reader["CustomerPhone"]?.ToString(),
+                            deliveryWorkerID = Convert.ToInt32(reader["DeliveryWorkerID"]),
+                            deliveryZoneID = reader["DeliveryZoneID"] == DBNull.Value ? (int?)null : Convert.ToInt32(reader["DeliveryZoneID"]),
+                            zoneName = reader["ZoneName"]?.ToString(),
+                            orderDate = Convert.ToDateTime(reader["OrderDate"]),
+                            orderType = reader["OrderType"]?.ToString(),
+                            status = reader["Status"]?.ToString(),
+                            subtotal = Convert.ToDecimal(reader["Subtotal"]),
+                            deliveryFee = Convert.ToDecimal(reader["DeliveryFee"]),
+                            discountAmount = Convert.ToDecimal(reader["DiscountAmount"]),
+                            totalAmount = Convert.ToDecimal(reader["TotalAmount"]),
+                            deliveryAddress = reader["DeliveryAddress"] == DBNull.Value ? null : reader["DeliveryAddress"]?.ToString(),
+                            notes = reader["Notes"] == DBNull.Value ? null : reader["Notes"]?.ToString()
+                        });
+                    }
                 }
 
                 return Ok(new
                 {
                     success = true,
                     workerID = workerId,
-                    count = orders.Count,
-                    orders = orders
+                    from = fromDate,
+                    to = toDate,
+                    page,
+                    pageSize,
+                    deliveredCount,
+                    totalAmount,
+                    averageAmount,
+                    currency = "IQD",
+                    orders
                 });
             }
             catch (Exception ex)
             {
-                return StatusCode(
-                    500,
-                    new
-                    {
-                        success = false,
-                        message = "Could not load delivered orders.",
-                        error = "تعذر تحميل سجل الطلبات المسلّمة."
-                    }
-                );
+                return StatusCode(500, new
+                {
+                    success = false,
+                    message = "Could not load the delivered-order history.",
+                    error = "تعذر تحميل سجل الطلبات المسلّمة بسبب خطأ داخلي."
+                });
             }
         }
-
-
 
         // =====================================================
         // TODAY'S DELIVERY STATISTICS
         // =====================================================
 
-        [HttpGet("{workerId}/today-stats")]
+        [HttpGet("{workerId:int}/today-stats")]
         public async Task<IActionResult> GetTodayStats(
             int workerId)
         {
@@ -831,7 +733,7 @@ namespace QamishloRestaurantAPI.Controllers
                         ) AS TotalAmount
                     FROM orders
                     WHERE DeliveryWorkerID = @workerId
-                      AND DATE(OrderDate) = CURDATE()
+                      AND BusinessDate = @businessDate
                       AND Status = 'Delivered';
                     """;
 
@@ -844,6 +746,10 @@ namespace QamishloRestaurantAPI.Controllers
                 command.Parameters.AddWithValue(
                     "@workerId",
                     workerId
+                );
+                command.Parameters.AddWithValue(
+                    "@businessDate",
+                    ExpensesController.BusinessDate(ExpensesController.BaghdadNow())
                 );
 
                 using MySqlDataReader reader =
@@ -869,9 +775,7 @@ namespace QamishloRestaurantAPI.Controllers
                             workerId,
 
                         date =
-                            DateTime.Now.ToString(
-                                "yyyy-MM-dd"
-                            ),
+                            ExpensesController.BusinessDate(ExpensesController.BaghdadNow()).ToString("yyyy-MM-dd"),
 
                         deliveredorders =
                             deliveredorders,
@@ -886,9 +790,7 @@ namespace QamishloRestaurantAPI.Controllers
                     success = true,
                     workerID = workerId,
                     date =
-                        DateTime.Now.ToString(
-                            "yyyy-MM-dd"
-                        ),
+                        ExpensesController.BusinessDate(ExpensesController.BaghdadNow()).ToString("yyyy-MM-dd"),
                     deliveredorders = 0,
                     totalAmount = 0
                 });

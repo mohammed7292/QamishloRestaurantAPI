@@ -418,6 +418,47 @@ namespace QamishloRestaurantAPI.Controllers
             });
         }
 
+        // Serve employee photos from durable MySQL storage. The URL shape stays
+        // /uploads/employees/{fileName}, so existing PhotoURL values remain valid.
+        [HttpGet("~/uploads/employees/{fileName}")]
+        public async Task<IActionResult> GetEmployeePhoto(string fileName)
+        {
+            string safeName = Path.GetFileName(fileName);
+            if (!string.Equals(safeName, fileName, StringComparison.Ordinal) ||
+                string.IsNullOrWhiteSpace(safeName))
+                return BadRequest();
+
+            await using var connection = DatabaseManager.GetConnection();
+            await connection.OpenAsync();
+            const string sql = "SELECT ContentType, ImageData FROM employeephotostorage WHERE FileName=@fileName LIMIT 1;";
+            await using var command = new MySqlCommand(sql, connection);
+            command.Parameters.AddWithValue("@fileName", safeName);
+            await using var reader = await command.ExecuteReaderAsync();
+            if (await reader.ReadAsync())
+            {
+                string contentType = reader.GetString("ContentType");
+                byte[] imageData = (byte[])reader["ImageData"];
+                return File(imageData, contentType);
+            }
+
+            // Backward compatibility for images uploaded by earlier deployments.
+            string legacyPath = Path.Combine(_environment.WebRootPath ??
+                Path.Combine(_environment.ContentRootPath, "wwwroot"), "uploads", "employees", safeName);
+            if (System.IO.File.Exists(legacyPath))
+                return PhysicalFile(legacyPath, GetEmployeePhotoContentType(safeName));
+
+            return NotFound();
+        }
+
+        private static string GetEmployeePhotoContentType(string fileName)
+            => Path.GetExtension(fileName).ToLowerInvariant() switch
+            {
+                ".jpg" or ".jpeg" => "image/jpeg",
+                ".png" => "image/png",
+                ".webp" => "image/webp",
+                _ => "application/octet-stream"
+            };
+
         // =====================================================
         // UPLOAD EMPLOYEE PHOTO
         // POST: api/EmployeeManagement/upload-photo
@@ -483,40 +524,28 @@ namespace QamishloRestaurantAPI.Controllers
                 });
             }
 
-            string webRoot = _environment.WebRootPath;
+            string fileName = $"{Guid.NewGuid():N}{extension}";
+            string contentType = GetEmployeePhotoContentType(fileName);
+            await using var imageStream = new MemoryStream();
+            await file.CopyToAsync(imageStream);
+            byte[] imageData = imageStream.ToArray();
 
-            if (string.IsNullOrWhiteSpace(webRoot))
+            // Persist image bytes in MySQL, not only in the disposable container filesystem.
+            await using (var connection = DatabaseManager.GetConnection())
             {
-                webRoot = Path.Combine(
-                    _environment.ContentRootPath,
-                    "wwwroot");
+                await connection.OpenAsync();
+                const string saveSql = """
+                    INSERT INTO employeephotostorage(FileName, ContentType, ImageData, UploadedAt)
+                    VALUES(@fileName, @contentType, @imageData, UTC_TIMESTAMP());
+                    """;
+                await using var save = new MySqlCommand(saveSql, connection);
+                save.Parameters.AddWithValue("@fileName", fileName);
+                save.Parameters.AddWithValue("@contentType", contentType);
+                save.Parameters.Add("@imageData", MySqlDbType.LongBlob).Value = imageData;
+                await save.ExecuteNonQueryAsync();
             }
 
-            string uploadDirectory = Path.Combine(
-                webRoot,
-                "uploads",
-                "employees");
-
-            Directory.CreateDirectory(uploadDirectory);
-
-            string fileName =
-                $"{Guid.NewGuid():N}{extension}";
-
-            string filePath = Path.Combine(
-                uploadDirectory,
-                fileName);
-
-            await using (var stream = new FileStream(
-                filePath,
-                FileMode.CreateNew,
-                FileAccess.Write,
-                FileShare.None))
-            {
-                await file.CopyToAsync(stream);
-            }
-
-            string photoUrl =
-                $"/uploads/employees/{fileName}";
+            string photoUrl = $"/uploads/employees/{fileName}";
 
             return Ok(new
             {

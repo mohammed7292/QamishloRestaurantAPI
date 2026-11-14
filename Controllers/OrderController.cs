@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using MySqlConnector;
 using QamishloRestaurantAPI.Database;
+using QamishloRestaurantAPI.Services;
 using System;
 using System.Collections.Generic;
 using System.Text.Json;
@@ -12,6 +13,13 @@ namespace QamishloRestaurantAPI.Controllers
     [Route("api/[controller]")]
     public class ordersController : ControllerBase
     {
+        private readonly FirebaseNotificationService _firebaseNotifications;
+
+        public ordersController(FirebaseNotificationService firebaseNotifications)
+        {
+            _firebaseNotifications = firebaseNotifications;
+        }
+
         // =========================================================
         // CREATE ORDER
         // POST: /api/orders
@@ -309,7 +317,7 @@ namespace QamishloRestaurantAPI.Controllers
                             SELECT Price
                             FROM products
                             WHERE ProductID = @ProductID
-                              AND (IsAvailable = 1 OR (AvailableUntil IS NOT NULL AND AvailableUntil <= DATE_ADD(UTC_TIMESTAMP(), INTERVAL 3 HOUR)))
+                              AND (IsAvailable = 1 OR (AvailableUntil IS NOT NULL AND AvailableUntil <= UTC_TIMESTAMP()))
                             LIMIT 1;";
 
                         using (
@@ -699,6 +707,11 @@ namespace QamishloRestaurantAPI.Controllers
                     // =================================================
 
                     await transaction.CommitAsync();
+
+                    // Dispatch a high-priority notification to registered restaurant devices.
+                    // Push failures are logged and must never invalidate an accepted customer order.
+                    await _firebaseNotifications.NotifyRestaurantNewOrderAsync(
+                        orderId, orderType, total);
 
                     // =================================================
                     // 9. RESPONSE
@@ -1339,6 +1352,7 @@ namespace QamishloRestaurantAPI.Controllers
                         od.OrderID,
                         od.ProductID,
                         p.ProductName,
+                        p.CategoryID,
                         p.ImageURL,
                         od.Quantity,
                         od.UnitPrice,
@@ -1389,6 +1403,8 @@ namespace QamishloRestaurantAPI.Controllers
                                 ProductName =
                                     reader.GetString(
                                         "ProductName"),
+
+                                CategoryID = reader.GetInt32("CategoryID"),
 
                                 ImageURL =
                                     reader.IsDBNull(
@@ -1453,7 +1469,9 @@ namespace QamishloRestaurantAPI.Controllers
 
         [HttpGet("{id:int}/tracking")]
         public async Task<IActionResult> TrackOrder(
-            int id)
+            int id,
+            [FromQuery] int customerId,
+            [FromQuery] string phone)
         {
             if (id <= 0)
             {
@@ -1480,6 +1498,8 @@ namespace QamishloRestaurantAPI.Controllers
                         o.TotalAmount,
                         o.DeliveryAddress,
                         o.Notes,
+                        o.CustomerLatitude,
+                        o.CustomerLongitude,
                         o.OrderDate,
                         o.DeliveryWorkerID,
 
@@ -1501,7 +1521,11 @@ namespace QamishloRestaurantAPI.Controllers
                         COALESCE(
                             dw.Phone,
                             ''
-                        ) AS DeliveryWorkerPhone
+                        ) AS DeliveryWorkerPhone,
+
+                        dw.CurrentLatitude AS DriverLatitude,
+                        dw.CurrentLongitude AS DriverLongitude,
+                        dw.LastLocationAt AS DriverLastLocationAt
 
                     FROM orders o
 
@@ -1514,6 +1538,8 @@ namespace QamishloRestaurantAPI.Controllers
                            dw.DeliveryWorkerID
 
                     WHERE o.OrderID = @OrderID
+                      AND o.CustomerID = @CustomerID
+                      AND c.Phone = @Phone
 
                     LIMIT 1;";
 
@@ -1525,6 +1551,8 @@ namespace QamishloRestaurantAPI.Controllers
                 command.Parameters.AddWithValue(
                     "@OrderID",
                     id);
+                command.Parameters.AddWithValue("@CustomerID", customerId);
+                command.Parameters.AddWithValue("@Phone", (phone ?? string.Empty).Trim());
 
                 using MySqlDataReader reader =
                     await command.ExecuteReaderAsync();
@@ -1552,8 +1580,13 @@ namespace QamishloRestaurantAPI.Controllers
                     reader["Notes"] == DBNull.Value
                         ? ""
                         : reader["Notes"]?.ToString() ?? "",
-                    out double? latitude,
-                    out double? longitude);
+                    out double? notesLatitude,
+                    out double? notesLongitude);
+
+                double? latitude = reader.IsDBNull(reader.GetOrdinal("CustomerLatitude"))
+                    ? notesLatitude : Convert.ToDouble(reader["CustomerLatitude"]);
+                double? longitude = reader.IsDBNull(reader.GetOrdinal("CustomerLongitude"))
+                    ? notesLongitude : Convert.ToDouble(reader["CustomerLongitude"]);
 
                 return Ok(new
                 {
@@ -1629,7 +1662,14 @@ namespace QamishloRestaurantAPI.Controllers
                         latitude,
 
                     longitude =
-                        longitude
+                        longitude,
+
+                    driverLatitude = reader.IsDBNull(reader.GetOrdinal("DriverLatitude"))
+                        ? (double?)null : reader.GetDouble(reader.GetOrdinal("DriverLatitude")),
+                    driverLongitude = reader.IsDBNull(reader.GetOrdinal("DriverLongitude"))
+                        ? (double?)null : reader.GetDouble(reader.GetOrdinal("DriverLongitude")),
+                    driverLastLocationAt = reader.IsDBNull(reader.GetOrdinal("DriverLastLocationAt"))
+                        ? (DateTime?)null : reader.GetDateTime(reader.GetOrdinal("DriverLastLocationAt"))
                 });
             }
             catch (Exception ex)
@@ -1748,343 +1788,243 @@ namespace QamishloRestaurantAPI.Controllers
                 "Cancelled");
         }
 
+        // Customer cancellation is explicitly tied to the customer's ID and phone.
+        [HttpPost("{id:int}/cancel-by-customer")]
+        public async Task<IActionResult> CancelByCustomer(
+            int id,
+            [FromBody] CustomerCancelOrderRequest request)
+        {
+            if (id <= 0 || request == null || request.CustomerID <= 0 ||
+                string.IsNullOrWhiteSpace(request.Phone))
+                return BadRequest(new { success = false, message = "بيانات إلغاء الطلب غير مكتملة." });
+
+            await using var connection = DatabaseManager.GetConnection();
+            await connection.OpenAsync();
+            await using var transaction = await connection.BeginTransactionAsync();
+            try
+            {
+                const string verifySql = @"
+                    SELECT o.CustomerID, o.Status
+                    FROM orders o
+                    INNER JOIN customers c ON c.CustomerID=o.CustomerID
+                    WHERE o.OrderID=@OrderID AND o.CustomerID=@CustomerID
+                      AND c.Phone=@Phone
+                    FOR UPDATE;";
+                int customerId;
+                string status;
+                await using (var verify = new MySqlCommand(verifySql, connection, transaction))
+                {
+                    verify.Parameters.AddWithValue("@OrderID", id);
+                    verify.Parameters.AddWithValue("@CustomerID", request.CustomerID);
+                    verify.Parameters.AddWithValue("@Phone", request.Phone.Trim());
+                    await using var reader = await verify.ExecuteReaderAsync();
+                    if (!await reader.ReadAsync())
+                    {
+                        await transaction.RollbackAsync();
+                        return NotFound(new { success = false, message = "لم يتم العثور على الطلب أو أن بيانات الزبون غير مطابقة." });
+                    }
+                    customerId = reader.GetInt32("CustomerID");
+                    status = reader.GetString("Status");
+                }
+
+                if (status is not ("New" or "Preparing"))
+                {
+                    await transaction.RollbackAsync();
+                    return Conflict(new { success = false, message = "لا يمكن إلغاء الطلب بعد بدء مرحلة الجاهزية أو التوصيل." });
+                }
+
+                const string updateSql = @"
+                    UPDATE orders SET Status='Cancelled', DeliveryWorkerID=NULL, UpdatedAt=UTC_TIMESTAMP()
+                    WHERE OrderID=@OrderID AND CustomerID=@CustomerID
+                      AND Status IN ('New','Preparing');";
+                await using (var update = new MySqlCommand(updateSql, connection, transaction))
+                {
+                    update.Parameters.AddWithValue("@OrderID", id);
+                    update.Parameters.AddWithValue("@CustomerID", customerId);
+                    if (await update.ExecuteNonQueryAsync() != 1)
+                    {
+                        await transaction.RollbackAsync();
+                        return Conflict(new { success = false, message = "تغيرت حالة الطلب قبل إلغائه. حدّث الصفحة وحاول مجدداً." });
+                    }
+                }
+
+                await NotificationsController.AddOrderStatusNotificationAsync(connection, transaction, customerId, id, "Cancelled");
+                await transaction.CommitAsync();
+                return Ok(new { success = true, orderID = id, status = "Cancelled", message = "تم إلغاء الطلب." });
+            }
+            catch
+            {
+                await transaction.RollbackAsync();
+                throw;
+            }
+        }
+
         // =========================================================
         // INTERNAL STATUS UPDATE
         // =========================================================
 
-        private async Task<IActionResult> UpdateStatusInternal(
-            int id,
-            string status)
+        private async Task<IActionResult> UpdateStatusInternal(int id, string status)
         {
+            await using var connection = DatabaseManager.GetConnection();
+            await connection.OpenAsync();
+            await using var transaction = await connection.BeginTransactionAsync();
+
             try
             {
-                using MySqlConnection connection =
-                    DatabaseManager.GetConnection();
-
-                await connection.OpenAsync();
-
-                // =================================================
-                // CHECK ORDER
-                // =================================================
-
-                string checkQuery = @"
-                    SELECT
-                        OrderID,
-                        OrderType,
-                        Status,
-                        DeliveryWorkerID,
-                        IsArchived
+                const string checkSql = """
+                    SELECT OrderID, CustomerID, OrderType, Status, DeliveryWorkerID, IsArchived
                     FROM orders
-                    WHERE OrderID = @OrderID
-                    LIMIT 1;";
+                    WHERE OrderID=@OrderID
+                    LIMIT 1
+                    FOR UPDATE;
+                    """;
 
-                string? orderType = null;
-                string? oldStatus = null;
-                int? notificationCustomerId = null;
-                int? currentWorkerID = null;
-
-                using (
-                    MySqlCommand checkCommand =
-                        new MySqlCommand(
-                            checkQuery,
-                            connection))
+                string orderType;
+                string oldStatus;
+                int? customerId;
+                int? currentWorkerId;
+                await using (var check = new MySqlCommand(checkSql, connection, transaction))
                 {
-                    checkCommand.Parameters.AddWithValue(
-                        "@OrderID",
-                        id);
-
-                    using MySqlDataReader reader =
-                        await checkCommand.ExecuteReaderAsync();
-
-                    if (!await reader.ReadAsync() || Convert.ToBoolean(reader["IsArchived"]))
+                    check.Parameters.AddWithValue("@OrderID", id);
+                    await using var reader = await check.ExecuteReaderAsync();
+                    if (!await reader.ReadAsync() || reader.GetBoolean("IsArchived"))
                     {
-                        return NotFound(new
-                        {
-                            success = false,
-                            message = $"Order #{id} was not found or has been archived."
-                        });
+                        await transaction.RollbackAsync();
+                        return NotFound(new { success = false, message = $"Order #{id} was not found or has been archived." });
                     }
 
-                    orderType =
-                        reader.GetString(
-                            reader.GetOrdinal(
-                                "OrderType"));
-
-                    oldStatus =
-                        reader.GetString(
-                            reader.GetOrdinal(
-                                "Status"));
-
-                    currentWorkerID =
-                        reader.IsDBNull(
-                            reader.GetOrdinal(
-                                "DeliveryWorkerID"))
-                            ? null
-                            : reader.GetInt32(
-                                reader.GetOrdinal(
-                                    "DeliveryWorkerID"));
+                    orderType = reader.GetString("OrderType");
+                    oldStatus = reader.GetString("Status");
+                    customerId = reader.IsDBNull(reader.GetOrdinal("CustomerID")) ? null : reader.GetInt32("CustomerID");
+                    currentWorkerId = reader.IsDBNull(reader.GetOrdinal("DeliveryWorkerID")) ? null : reader.GetInt32("DeliveryWorkerID");
                 }
 
-                // =================================================
-                // STATUS RULES
-                // =================================================
-
-                if (oldStatus == "Cancelled" &&
-                    status != "Cancelled")
+                if (oldStatus == "Cancelled" && status != "Cancelled")
                 {
-                    return BadRequest(new
-                    {
-                        success = false,
-                        message =
-                            "A cancelled order cannot be reopened."
-                    });
+                    await transaction.RollbackAsync();
+                    return BadRequest(new { success = false, message = "A cancelled order cannot be reopened." });
+                }
+                if (oldStatus == "Delivered" && status != "Delivered")
+                {
+                    await transaction.RollbackAsync();
+                    return BadRequest(new { success = false, message = "A delivered order cannot change status." });
                 }
 
-                if (oldStatus == "Delivered" &&
-                    status != "Delivered")
+                bool validTransition =
+                    (oldStatus == "New" && (status == "Preparing" || status == "Cancelled")) ||
+                    (oldStatus == "Preparing" && (status == "Ready" || status == "Cancelled")) ||
+                    (oldStatus == "Ready" && (status == "Delivered" || status == "OutForDelivery" || status == "Cancelled")) ||
+                    (oldStatus == "OutForDelivery" && status == "Delivered") ||
+                    oldStatus == status;
+                if (!validTransition)
                 {
-                    return BadRequest(new
-                    {
-                        success = false,
-                        message =
-                            "A delivered order cannot change status."
-                    });
+                    await transaction.RollbackAsync();
+                    return BadRequest(new { success = false, message = $"Cannot change order from {oldStatus} to {status}." });
                 }
 
-                // =================================================
-                // DELIVERY WORKER ASSIGNMENT
-                //
-                // When the restaurant accepts a new DELIVERY order
-                // by changing it to Preparing, automatically assign
-                // the available delivery worker with the fewest
-                // active delivery orders.
-                // =================================================
+                int? assignedWorkerId = currentWorkerId;
+                string assignedWorkerName = string.Empty;
+                string assignedWorkerPhone = string.Empty;
 
-                int? assignedWorkerID = currentWorkerID;
-                string assignedWorkerName = "";
-                string assignedWorkerPhone = "";
-
-                if (status == "Preparing" &&
-                    orderType == "Delivery" &&
-                    currentWorkerID == null &&
-                    oldStatus == "New")
+                if (status == "Preparing" && orderType == "Delivery" && currentWorkerId is null && oldStatus == "New")
                 {
-                    string workerQuery = @"
-                        SELECT
-                            dw.DeliveryWorkerID,
-                            dw.FullName,
-                            COALESCE(dw.Phone, '') AS Phone
+                    const string workerSql = """
+                        SELECT dw.DeliveryWorkerID, dw.FullName, COALESCE(dw.Phone,'') AS Phone
                         FROM deliveryworkers dw
-                        WHERE dw.IsActive = 1
-                        ORDER BY
-                            (
-                                SELECT COUNT(*)
-                                FROM orders o2
-                                WHERE
-                                    o2.DeliveryWorkerID =
-                                        dw.DeliveryWorkerID
-                                    AND o2.OrderType = 'Delivery'
-                                    AND o2.Status IN
-                                        ('New', 'Preparing', 'Ready')
-                            ) ASC,
-                            dw.DeliveryWorkerID ASC
-                        LIMIT 1;";
-
-                    using (
-                        MySqlCommand workerCommand =
-                            new MySqlCommand(
-                                workerQuery,
-                                connection))
+                        WHERE dw.IsActive=1 AND dw.IsOnShift=1
+                        ORDER BY (
+                            SELECT COUNT(*) FROM orders activeOrders
+                            WHERE activeOrders.DeliveryWorkerID=dw.DeliveryWorkerID
+                              AND activeOrders.OrderType='Delivery'
+                              AND activeOrders.Status IN ('Preparing','Ready','OutForDelivery')
+                              AND activeOrders.IsArchived=0
+                        ) ASC, dw.DeliveryWorkerID ASC
+                        LIMIT 1
+                        FOR UPDATE;
+                        """;
+                    await using var worker = new MySqlCommand(workerSql, connection, transaction);
+                    await using var workerReader = await worker.ExecuteReaderAsync();
+                    if (!await workerReader.ReadAsync())
                     {
-                        using MySqlDataReader workerReader =
-                            await workerCommand.ExecuteReaderAsync();
+                        await workerReader.CloseAsync();
+                        await transaction.RollbackAsync();
+                        return Conflict(new { success = false, message = "لا يوجد عامل توصيل نشط وعلى رأس الدوام حالياً." });
+                    }
+                    assignedWorkerId = workerReader.GetInt32("DeliveryWorkerID");
+                    assignedWorkerName = workerReader.GetString("FullName");
+                    assignedWorkerPhone = workerReader.GetString("Phone");
+                    await workerReader.CloseAsync();
+                }
 
-                        if (!await workerReader.ReadAsync())
-                        {
-                            return Conflict(new
-                            {
-                                success = false,
-                                message =
-                                    "No active delivery worker is currently available."
-                            });
-                        }
-
-                        assignedWorkerID =
-                            workerReader.GetInt32(
-                                workerReader.GetOrdinal(
-                                    "DeliveryWorkerID"));
-
-                        assignedWorkerName =
-                            workerReader.GetString(
-                                workerReader.GetOrdinal(
-                                    "FullName"));
-
-                        assignedWorkerPhone =
-                            workerReader.GetString(
-                                workerReader.GetOrdinal(
-                                    "Phone"));
+                bool clearWorker = status == "Cancelled";
+                const string updateSql = """
+                    UPDATE orders
+                    SET Status=@Status,
+                        DeliveryWorkerID=CASE WHEN @ClearWorker=1 THEN NULL WHEN @AssignedWorkerID IS NOT NULL THEN @AssignedWorkerID ELSE DeliveryWorkerID END,
+                        DeliveryAssignedAt=CASE WHEN @NewAssignment=1 THEN UTC_TIMESTAMP() ELSE DeliveryAssignedAt END,
+                        PickedUpAt=CASE WHEN @Status='OutForDelivery' AND PickedUpAt IS NULL THEN UTC_TIMESTAMP() ELSE PickedUpAt END,
+                        UpdatedAt=UTC_TIMESTAMP()
+                    WHERE OrderID=@OrderID AND Status=@OldStatus AND IsArchived=0;
+                    """;
+                await using (var update = new MySqlCommand(updateSql, connection, transaction))
+                {
+                    update.Parameters.AddWithValue("@Status", status);
+                    update.Parameters.AddWithValue("@ClearWorker", clearWorker);
+                    update.Parameters.AddWithValue("@AssignedWorkerID", assignedWorkerId.HasValue && !clearWorker ? assignedWorkerId.Value : DBNull.Value);
+                    update.Parameters.AddWithValue("@NewAssignment", assignedWorkerId.HasValue && currentWorkerId is null && status == "Preparing" && oldStatus == "New" && orderType == "Delivery");
+                    update.Parameters.AddWithValue("@OrderID", id);
+                    update.Parameters.AddWithValue("@OldStatus", oldStatus);
+                    if (await update.ExecuteNonQueryAsync() != 1)
+                    {
+                        await transaction.RollbackAsync();
+                        return Conflict(new { success = false, message = "تغير الطلب أثناء التحديث. حدّث القائمة وحاول مجدداً." });
                     }
                 }
 
-                // =================================================
-                // UPDATE ORDER
-                // =================================================
-
-                string updateQuery;
-
-                if (assignedWorkerID.HasValue &&
-                    currentWorkerID == null &&
-                    status == "Preparing" &&
-                    orderType == "Delivery" &&
-                    oldStatus == "New")
+                if (assignedWorkerId.HasValue && !clearWorker && string.IsNullOrWhiteSpace(assignedWorkerName))
                 {
-                    updateQuery = @"
-                        UPDATE orders
-                        SET
-                            Status = @Status,
-                            DeliveryWorkerID =
-                                @DeliveryWorkerID,
-                            UpdatedAt = CURRENT_TIMESTAMP
-                        WHERE OrderID = @OrderID
-                          AND Status = 'New'
-                          AND DeliveryWorkerID IS NULL;";
-                }
-                else
-                {
-                    updateQuery = @"
-                        UPDATE orders
-                        SET
-                            Status = @Status,
-                            UpdatedAt = CURRENT_TIMESTAMP
-                        WHERE OrderID = @OrderID;";
-                }
-
-                using (
-                    MySqlCommand command =
-                        new MySqlCommand(
-                            updateQuery,
-                            connection))
-                {
-                    command.Parameters.AddWithValue(
-                        "@Status",
-                        status);
-
-                    command.Parameters.AddWithValue(
-                        "@OrderID",
-                        id);
-
-                    if (assignedWorkerID.HasValue &&
-                        currentWorkerID == null &&
-                        status == "Preparing" &&
-                        orderType == "Delivery" &&
-                        oldStatus == "New")
+                    const string assignedSql = "SELECT FullName, COALESCE(Phone,'') AS Phone FROM deliveryworkers WHERE DeliveryWorkerID=@id LIMIT 1";
+                    await using var assigned = new MySqlCommand(assignedSql, connection, transaction);
+                    assigned.Parameters.AddWithValue("@id", assignedWorkerId.Value);
+                    await using var reader = await assigned.ExecuteReaderAsync();
+                    if (await reader.ReadAsync())
                     {
-                        command.Parameters.AddWithValue(
-                            "@DeliveryWorkerID",
-                            assignedWorkerID.Value);
-                    }
-
-                    int affectedRows =
-                        await command.ExecuteNonQueryAsync();
-
-                    if (affectedRows == 0)
-                    {
-                        return Conflict(new
-                        {
-                            success = false,
-                            message =
-                                "The order was changed by another process. Please refresh and try again."
-                        });
+                        assignedWorkerName = reader.GetString("FullName");
+                        assignedWorkerPhone = reader.GetString("Phone");
                     }
                 }
 
-                // =================================================
-                // IF THE ORDER ALREADY HAD A WORKER, LOAD HIS DATA
-                // =================================================
-
-                if (assignedWorkerID.HasValue &&
-                    string.IsNullOrWhiteSpace(
-                        assignedWorkerName))
+                if (customerId.HasValue && status != oldStatus)
                 {
-                    string assignedWorkerQuery = @"
-                        SELECT
-                            FullName,
-                            COALESCE(Phone, '') AS Phone
-                        FROM deliveryworkers
-                        WHERE DeliveryWorkerID =
-                            @DeliveryWorkerID
-                        LIMIT 1;";
-
-                    using (
-                        MySqlCommand workerCommand =
-                            new MySqlCommand(
-                                assignedWorkerQuery,
-                                connection))
-                    {
-                        workerCommand.Parameters.AddWithValue(
-                            "@DeliveryWorkerID",
-                            assignedWorkerID.Value);
-
-                        using MySqlDataReader workerReader =
-                            await workerCommand.ExecuteReaderAsync();
-
-                        if (await workerReader.ReadAsync())
-                        {
-                            assignedWorkerName =
-                                workerReader.GetString(
-                                    workerReader.GetOrdinal(
-                                        "FullName"));
-
-                            assignedWorkerPhone =
-                                workerReader.GetString(
-                                    workerReader.GetOrdinal(
-                                        "Phone"));
-                        }
-                    }
+                    await NotificationsController.AddOrderStatusNotificationAsync(
+                        connection, transaction, customerId.Value, id, status);
                 }
 
+                await transaction.CommitAsync();
                 return Ok(new
                 {
                     success = true,
-
                     orderId = id,
-
-                    orderType = orderType,
-
-                    oldStatus = oldStatus,
-
-                    status = status,
-
-                    deliveryWorkerID =
-                        assignedWorkerID,
-
-                    deliveryWorkerName =
-                        assignedWorkerName,
-
-                    deliveryWorkerPhone =
-                        assignedWorkerPhone,
-
-                    message =
-                        assignedWorkerID.HasValue &&
-                        oldStatus == "New" &&
-                        status == "Preparing" &&
-                        orderType == "Delivery"
-                            ? "Order accepted and assigned to a delivery worker."
-                            : "Order status updated successfully."
+                    orderType,
+                    oldStatus,
+                    status,
+                    deliveryWorkerID = clearWorker ? null : assignedWorkerId,
+                    deliveryWorkerName = clearWorker ? null : assignedWorkerName,
+                    deliveryWorkerPhone = clearWorker ? null : assignedWorkerPhone,
+                    message = assignedWorkerId.HasValue && oldStatus == "New" && status == "Preparing" && orderType == "Delivery"
+                        ? $"تم قبول الطلب وإسناده تلقائياً إلى العامل {assignedWorkerName}."
+                        : "تم تحديث حالة الطلب بنجاح."
                 });
             }
             catch (Exception ex)
             {
-                return StatusCode(
-                    500,
-                    new
-                    {
-                        success = false,
-                        message =
-                            "Failed to update order status.",
-                        error =
-                            "تعذر إكمال العملية حالياً. يرجى المحاولة لاحقاً."
-                    });
+                try { await transaction.RollbackAsync(); } catch { }
+                return StatusCode(500, new
+                {
+                    success = false,
+                    message = "Failed to update order status.",
+                    error = "تعذر إكمال العملية حالياً. يرجى المحاولة لاحقاً."
+                });
             }
         }
 
@@ -2596,6 +2536,12 @@ namespace QamishloRestaurantAPI.Controllers
         public string Status { get; set; } = "";
     }
 
+    public sealed class CustomerCancelOrderRequest
+    {
+        public int CustomerID { get; set; }
+        public string Phone { get; set; } = "";
+    }
+
     // =============================================================
     // ORDER RESPONSE
     // =============================================================
@@ -2691,6 +2637,8 @@ namespace QamishloRestaurantAPI.Controllers
         public int ProductID { get; set; }
 
         public string ProductName { get; set; } = "";
+
+        public int CategoryID { get; set; }
 
         public string? ImageURL { get; set; }
 

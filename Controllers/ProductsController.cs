@@ -203,7 +203,7 @@ namespace QamishloRestaurantAPI.Controllers
             }
 
             if (!product.IsAvailable && product.AvailableUntil.HasValue &&
-                product.AvailableUntil.Value <= ExpensesController.BaghdadNow())
+                product.AvailableUntil.Value.ToUniversalTime() <= DateTime.UtcNow)
             {
                 message = "وقت انتهاء عدم التوفر يجب أن يكون في المستقبل.";
                 return false;

@@ -3,6 +3,20 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddControllers();
 
+// Browser clients (customer app, delivery portal and POS) use the same API host.
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("QamishloClients", policy =>
+    {
+        policy.AllowAnyOrigin()
+              .AllowAnyHeader()
+              .AllowAnyMethod();
+    });
+});
+
+// FCM is optional: missing credentials disable push only, never order creation.
+builder.Services.AddSingleton<QamishloRestaurantAPI.Services.FirebaseNotificationService>();
+
 builder.Services.AddOpenApi();
 builder.Services.AddSwaggerGen();
 
@@ -41,6 +55,7 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
+app.UseCors("QamishloClients");
 app.UseStaticFiles();
 
 app.MapControllers();

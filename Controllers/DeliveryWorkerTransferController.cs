@@ -44,7 +44,7 @@ public sealed class DeliveryWorkerTransferController : ControllerBase
         const string workersSql = """
             SELECT DeliveryWorkerID, FullName, Phone
             FROM deliveryworkers
-            WHERE IsActive = 1 AND DeliveryWorkerID <> @currentWorker
+            WHERE IsActive = 1 AND IsOnShift = 1 AND DeliveryWorkerID <> @currentWorker
             ORDER BY FullName;
             """;
         await using var command = new MySqlCommand(workersSql, connection);

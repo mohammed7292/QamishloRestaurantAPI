@@ -45,9 +45,15 @@ public sealed class StaffPayrollController : ControllerBase
     [HttpDelete("{id:int}")]
     public async Task<IActionResult> Deactivate(int id)
     {
-        if (!await ManagerCredentialValidator.IsManagerAsync(Request)) return Unauthorized(new{success=false});
-        await using var c=DatabaseManager.GetConnection();await c.OpenAsync();await using var cmd=new MySqlCommand("UPDATE restaurantemployees SET IsActive=0,ShowInCustomerApp=0 WHERE EmployeeID=@id",c);cmd.Parameters.AddWithValue("@id",id);
-        return await cmd.ExecuteNonQueryAsync()==0?NotFound(new{success=false}):Ok(new{success=true});
+        if (!await ManagerCredentialValidator.IsManagerAsync(Request)) return Unauthorized(new { success = false });
+        if (id <= 0) return BadRequest(new { success = false, message = "معرّف الموظف غير صحيح." });
+        await using var c = DatabaseManager.GetConnection();
+        await c.OpenAsync();
+        await using var cmd = new MySqlCommand("DELETE FROM restaurantemployees WHERE EmployeeID=@id", c);
+        cmd.Parameters.AddWithValue("@id", id);
+        return await cmd.ExecuteNonQueryAsync() == 0
+            ? NotFound(new { success = false, message = "الموظف غير موجود." })
+            : Ok(new { success = true, deleted = true });
     }
 
     [HttpPost("{id:int}/transactions")]
