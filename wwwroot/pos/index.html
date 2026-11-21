@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>قامشلو POS — نقطة البيع الشاملة (تعمل على أي ويندوز)</title>
+<style>
+:root{--bg:#14110F;--panel:#25201D;--orange:#F37A1F;--text:#FFF;--muted:#B0A69E;--line:rgba(255,255,255,.14)}
+*{box-sizing:border-box;font-family:Segoe UI,Tahoma,sans-serif}
+body{margin:0;background:var(--bg);color:var(--text);height:100vh;display:flex;flex-direction:column}
+header{display:flex;align-items:center;justify-content:space-between;padding:10px 18px;background:#1C1714;border-bottom:1px solid var(--line)}
+header h1{margin:0;font-size:18px;color:var(--orange)}
+.status{font-size:12px;padding:5px 10px;border-radius:99px;background:#2E241C;border:1px solid var(--orange);color:#FFD54F}
+.layout{flex:1;display:grid;grid-template-columns:1fr 370px;gap:14px;padding:14px;overflow:hidden}
+.left,.right{display:flex;flex-direction:column;gap:10px;overflow:hidden}
+.search-bar{display:flex;gap:8px}
+input,select{background:#1B1613;color:#fff;border:1px solid var(--line);border-radius:10px;padding:9px 12px;font-size:14px;outline:0}
+input:focus{border-color:var(--orange)}
+.cats{display:flex;gap:6px;overflow-x:auto;padding-bottom:4px}
+.cat-btn{white-space:nowrap;border:1px solid var(--line);background:var(--panel);color:#fff;padding:7px 14px;border-radius:12px;cursor:pointer;font-weight:700}
+.cat-btn.active{background:var(--orange);color:#14110F;border-color:var(--orange)}
+.grid{flex:1;overflow-y:auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;align-content:start}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:12px;cursor:pointer;transition:.15s;display:flex;flex-direction:column;justify-content:space-between;gap:6px}
+.card:hover{border-color:var(--orange);transform:translateY(-2px)}
+.card strong{font-size:14px}
+.card .price{color:var(--orange);font-weight:800;font-size:14px}
+.right{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:14px}
+.cart-items{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:8px}
+.cart-row{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 10px;background:#1A1512;border-radius:10px;border:1px solid var(--line)}
+.qty-btn{width:28px;height:28px;border:0;border-radius:8px;background:#3A2C22;color:#fff;font-weight:800;cursor:pointer}
+.btn{border:0;border-radius:12px;padding:11px 14px;font-weight:800;cursor:pointer;font-size:14px}
+.btn-primary{background:var(--orange);color:#14110F}
+.btn-ghost{background:#302720;color:#fff}
+.total-line{display:flex;justify-content:space-between;font-size:19px;font-weight:800;padding:10px 0;border-top:1px solid var(--line)}
+.total-line span:last-child{color:var(--orange)}
+@media(max-width:850px){.layout{grid-template-columns:1fr;overflow:auto}}
+</style>
+</head>
+<body>
+<header>
+  <h1>🍔 مطعم قامشلو — نقطة البيع الشاملة (POS)</h1>
+  <div style="display:flex;gap:8px;align-items:center">
+    <span id="netStatus" class="status">🟢 متصل بالسيرفر</span>
+    <button class="btn btn-ghost" style="padding:7px 12px;font-size:12px" onclick="syncOffline()">☁️ مزامنة (<span id="offCnt">0</span>)</button>
+    <button class="btn btn-ghost" style="padding:7px 12px;font-size:12px" onclick="loadMenu()">🔄 تحديث</button>
+  </div>
+</header>
+<div class="layout">
+  <div class="left">
+    <div class="search-bar">
+      <input id="searchBox" style="flex:1" placeholder="ابحث عن وجبة أو منتج..." oninput="renderProducts()"/>
+      <select id="orderType">
+        <option value="Dine In">🍽️ داخل المطعم</option>
+        <option value="Takeaway">🥡 سفري</option>
+        <option value="Delivery">🛵 توصيل</option>
+      </select>
+    </div>
+    <div id="cats" class="cats"></div>
+    <div id="grid" class="grid"></div>
+  </div>
+  <div class="right">
+    <h3 style="margin:0">🛒 سلة الطلب الحالي</h3>
+    <div id="cart" class="cart-items"></div>
+    <input id="notes" placeholder="ملاحظات الطلب / رقم الطاولة..."/>
+    <div class="total-line"><span>الإجمالي</span><span id="total">0 د.ع</span></div>
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-primary" style="flex:1" onclick="submitOrder()">🚀 تأكيد وطباعة الفاتورة</button>
+      <button class="btn btn-ghost" onclick="cart=[];renderCart()">مسح</button>
+    </div>
+  </div>
+</div>
+<script>
+const API = window.location.origin + '/';
+let products = [], categories = [], activeCat = 0, cart = [];
+const OFF_KEY = 'qamishlo.webpos.offline';
+function getOff(){ try{return JSON.parse(localStorage.getItem(OFF_KEY)||'[]')}catch{return[]} }
+function setOff(l){ localStorage.setItem(OFF_KEY, JSON.stringify(l)); document.getElementById('offCnt').textContent=l.length; }
+async function loadMenu(){
+  try{
+    const [pRes, cRes] = await Promise.all([fetch(API+'api/products'), fetch(API+'api/categories')]);
+    products = await pRes.json();
+    const cData = await cRes.json();
+    categories = Array.isArray(cData) ? cData : (cData.categories || []);
+    localStorage.setItem('qamishlo.webpos.menu', JSON.stringify({products, categories}));
+    document.getElementById('netStatus').textContent = '🟢 متصل بالسيرفر';
+  }catch{
+    const cached = JSON.parse(localStorage.getItem('qamishlo.webpos.menu')||'{"products":[],"categories":[]}');
+    products = cached.products; categories = cached.categories;
+    document.getElementById('netStatus').textContent = '🟠 وضع الأوفلاين (يعمل محلياً)';
+  }
+  renderCats(); renderProducts(); setOff(getOff());
+}
+function renderCats(){
+  const box = document.getElementById('cats');
+  box.innerHTML = `<button class="cat-btn ${activeCat===0?'active':''}" onclick="activeCat=0;renderCats();renderProducts()">الكل</button>` +
+    categories.map(c => { const id = c.CategoryID||c.categoryID||0; const nm = c.CategoryName||c.categoryName||''; return `<button class="cat-btn ${activeCat===id?'active':''}" onclick="activeCat=${id};renderCats();renderProducts()">${nm}</button>`; }).join('');
+}
+function renderProducts(){
+  const q = document.getElementById('searchBox').value.trim().toLowerCase();
+  const list = products.filter(p => (p.IsAvailable ?? p.isAvailable ?? true) && (!activeCat || (p.CategoryID||p.categoryID)===activeCat) && (!q || String(p.ProductName||p.productName||'').toLowerCase().includes(q)));
+  document.getElementById('grid').innerHTML = list.map(p => {
+    const id = p.ProductID||p.productID; const nm = p.ProductName||p.productName; const pr = Number(p.Price||p.price||0);
+    return `<div class="card" onclick="addCart(${id})"><strong>${nm}</strong><div class="price">${pr.toLocaleString()} د.ع</div></div>`;
+  }).join('');
+}
+function addCart(id){
+  const p = products.find(x => (x.ProductID||x.productID)===id); if(!p) return;
+  const ex = cart.find(x => x.id===id);
+  if(ex) ex.qty++; else cart.push({id, name: p.ProductName||p.productName, price: Number(p.Price||p.price||0), qty: 1});
+  renderCart();
+}
+function renderCart(){
+  const box = document.getElementById('cart');
+  let tot = 0;
+  box.innerHTML = cart.map((i, idx) => { tot += i.price * i.qty; return `<div class="cart-row"><div><strong>${i.name}</strong><div style="font-size:12px;color:#F37A1F">${(i.price*i.qty).toLocaleString()} د.ع</div></div><div style="display:flex;gap:5px;align-items:center"><button class="qty-btn" onclick="cart[${idx}].qty--;if(cart[${idx}].qty<=0)cart.splice(${idx},1);renderCart()">-</button><span>${i.qty}</span><button class="qty-btn" onclick="cart[${idx}].qty++;renderCart()">+</button></div></div>`; }).join('') || '<div style="color:#888;text-align:center;margin-top:30px">السلة فارغة</div>';
+  document.getElementById('total').textContent = tot.toLocaleString() + ' د.ع';
+}
+async function submitOrder(){
+  if(!cart.length) return alert('أضف منتجات للسلة أولاً');
+  const payload = {
+    ClientOrderGuid: 'webpos-' + Date.now() + '-' + Math.random().toString(36).slice(2,7),
+    OrderType: document.getElementById('orderType').value,
+    Notes: document.getElementById('notes').value.trim(),
+    Items: cart.map(i => ({ ProductID: i.id, Quantity: i.qty }))
+  };
+  try{
+    const r = await fetch(API + 'api/orders/manager', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+    if(!r.ok) throw new Error('HTTP ' + r.status);
+    printReceipt(cart, payload.Notes);
+    cart = []; document.getElementById('notes').value = ''; renderCart();
+    alert('✅ تم تسجيل الطلب بنجاح!');
+  }catch{
+    const q = getOff(); q.push(payload); setOff(q);
+    printReceipt(cart, payload.Notes + ' (أوفلاين)');
+    cart = []; document.getElementById('notes').value = ''; renderCart();
+    alert('🟠 تم حفظ الطلب محلياً (أوفلاين) وستتم مزامنته تلقائياً فور عودة الإنترنت!');
+  }
+}
+function printReceipt(items, note){
+  const w = window.open('', '', 'width=320,height=520');
+  if(!w) return;
+  const tot = items.reduce((s,i)=>s+i.price*i.qty, 0);
+  w.document.write(`<html dir="rtl"><body style="font-family:Tahoma;font-size:13px;padding:10px"><h2 style="text-align:center;margin:0">مطعم قامشلو</h2><p style="text-align:center;margin:4px 0">${new Date().toLocaleString('ar-IQ')}</p><hr>${items.map(i=>`<div style="display:flex;justify-content:space-between"><span>${i.name} × ${i.qty}</span><strong>${(i.price*i.qty).toLocaleString()}</strong></div>`).join('')}<hr><h3>الإجمالي: ${tot.toLocaleString()} د.ع</h3>${note?`<p>ملاحظات: ${note}</p>`:''}</body></html>`);
+  w.document.close(); w.print(); w.close();
+}
+async function syncOffline(){
+  const q = getOff(); if(!q.length) return;
+  const rem = []; let ok = 0;
+  for(const p of q){
+    try{ const r = await fetch(API+'api/orders/manager', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)}); if(r.ok) ok++; else rem.push(p); }
+    catch{ rem.push(p); }
+  }
+  setOff(rem);
+  if(ok) alert(`☁️ تمت مزامنة ${ok} طلب محلي بنجاح!`);
+}
+setInterval(syncOffline, 20000);
+loadMenu();
+</script>
+</body>
+</html>

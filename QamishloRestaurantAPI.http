@@ -1,0 +1,6 @@
+@QamishloRestaurantAPI_HostAddress = http://localhost:5091
+
+GET {{QamishloRestaurantAPI_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
