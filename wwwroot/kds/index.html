@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>شاشة المطبخ الحية — مطعم قامشلو (KDS V13)</title>
+<style>
+:root{--bg:#14110F;--panel:#25201D;--orange:#F37A1F;--green:#33B879;--red:#E53935;--text:#FFF;--line:rgba(255,255,255,.14)}
+*{box-sizing:border-box;font-family:Segoe UI,Tahoma,sans-serif}
+body{margin:0;background:var(--bg);color:var(--text);min-height:100vh;padding:14px}
+header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;padding:12px 16px;background:var(--panel);border:1px solid rgba(243,122,31,.45);border-radius:16px;margin-bottom:14px}
+header h1{margin:0;font-size:19px;color:var(--orange)}
+.stations{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+.st-btn{border:1px solid var(--line);background:var(--panel);color:#fff;padding:8px 14px;border-radius:12px;font-weight:700;cursor:pointer}
+.st-btn.active{background:var(--orange);color:#14110F;border-color:var(--orange)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:14px}
+.ticket{background:var(--panel);border:2px solid var(--line);border-radius:18px;padding:14px;display:flex;flex-direction:column;gap:10px}
+.ticket.delayed{border-color:var(--red);box-shadow:0 0 18px rgba(229,57,53,.35)}
+.ticket.ready{border-color:var(--green)}
+.t-head{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--line);padding-bottom:8px}
+.t-no{font-size:20px;font-weight:900;color:var(--orange)}
+.t-time{padding:4px 10px;border-radius:99px;font-size:12px;font-weight:800;background:#33261C;color:#FFD54F}
+.ticket.delayed .t-time{background:var(--red);color:#fff}
+.items{display:flex;flex-direction:column;gap:6px;font-size:15px;font-weight:700}
+.note{background:#1A1512;border:1px dashed var(--orange);border-radius:10px;padding:8px;font-size:12px;color:#FFD54F}
+.actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:auto}
+.btn{border:0;border-radius:12px;padding:10px;font-weight:800;font-size:13px;cursor:pointer}
+.btn-prep{background:var(--orange);color:#14110F}
+.btn-ready{background:var(--green);color:#fff}
+</style>
+</head>
+<body>
+<header>
+  <h1>👨‍🍳 شاشة المطبخ الحية — قامشلو (KDS V13)</h1>
+  <div style="display:flex;gap:8px;align-items:center">
+    <span id="liveBadge" style="font-size:12px;color:#9FE8BD">🟢 تحديث تلقائي كل 6 ثوانٍ</span>
+    <button class="st-btn" onclick="loadKds()">🔄 تحديث</button>
+  </div>
+</header>
+<div id="stations" class="stations"></div>
+<div id="grid" class="grid"></div>
+<script>
+const API = window.location.origin + '/';
+let activeStation = 'ALL';
+async function loadStations(){
+  try{
+    const r = await fetch(API + 'api/kitchen/stations');
+    const d = await r.json();
+    const list = d.stations || [];
+    document.getElementById('stations').innerHTML =
+      `<button class="st-btn ${activeStation==='ALL'?'active':''}" onclick="activeStation='ALL';loadStations();loadKds()">الكل</button>` +
+      list.map(s => `<button class="st-btn ${activeStation===s.stationCode?'active':''}" onclick="activeStation='${s.stationCode}';loadStations();loadKds()">${s.stationName}</button>`).join('');
+  }catch{}
+}
+async function loadKds(){
+  try{
+    const r = await fetch(API + 'api/kitchen/orders?station=' + encodeURIComponent(activeStation));
+    const d = await r.json();
+    const orders = d.orders || [];
+    document.getElementById('liveBadge').textContent = `🟢 متصل (${orders.length} طلب نشط)`;
+    document.getElementById('grid').innerHTML = orders.length ? orders.map(o => `
+      <article class="ticket ${o.isDelayed ? 'delayed' : ''} ${o.kdsStatus==='Ready' ? 'ready' : ''}">
+        <div class="t-head">
+          <span class="t-no">طلب #${o.orderID}</span>
+          <span class="t-time">⏱️ ${o.elapsedMinutes} د / ${o.targetMinutes} د</span>
+        </div>
+        <div style="font-size:12px;color:#B9B0A8">النوع: ${o.orderType} · الحالة: <strong>${o.kdsStatus}</strong></div>
+        <div class="items">${(o.items||[]).map(i => `<div>• ${i.productName} × ${i.quantity}</div>`).join('')}</div>
+        ${o.notes ? `<div class="note">📝 ${o.notes}</div>` : ''}
+        <div class="actions">
+          <button class="btn btn-prep" onclick="setStatus(${o.orderID},'Preparing')">🍳 قيد التحضير</button>
+          <button class="btn btn-ready" onclick="setStatus(${o.orderID},'Ready')">✅ جاهز للتسليم</button>
+        </div>
+      </article>`).join('') : '<div style="grid-column:1/-1;text-align:center;padding:50px;color:#9E9690;font-size:16px">✅ لا توجد طلبات معلّقة في المطبخ حالياً</div>';
+  }catch{
+    document.getElementById('liveBadge').textContent = '🔴 تعذر الاتصال بالخادم — جاري إعادة المحاولة...';
+  }
+}
+async function setStatus(id, st){
+  await fetch(API + `api/kitchen/orders/${id}/status`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ kdsStatus: st, stationCode: activeStation==='ALL'?'GENERAL':activeStation }) });
+  loadKds();
+}
+loadStations(); loadKds(); setInterval(loadKds, 6000);
+</script>
+</body>
+</html>
